@@ -1,5 +1,5 @@
-# OSM(Overpass) 기반 트레킹 코스/주변 장소 추천 로직 (Streamlit UI와 분리)
-
+# osm_backend.py
+# OSM(Overpass) 기반 트레킹 코스/주변 장소 추천 로직 + ORS 고도(Altitude) 프로파일
 from __future__ import annotations
 
 import math
@@ -21,6 +21,10 @@ OVERPASS_URLS = [
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.nchc.org.tw/api/interpreter",
 ]
+
+# ORS(OpenRouteService) Elevation(고도) API
+ORS_ELEVATION_LINE_URL = "https://api.openrouteservice.org/elevation/line"
+ORS_MAX_VERTICES = 2000  # vertex 제한이 있을 수 있어 안전하게 샘플링
 
 
 def bbox_from_center(
@@ -60,7 +64,7 @@ def _safe_get(d: Dict[str, Any], k: str, default: str = "") -> str:
 
 def _difficulty_from_sac(sac: str) -> str:
     """
-    OSM sac_scale:
+    OSM sac_scale 예:
       hiking
       mountain_hiking
       demanding_mountain_hiking
@@ -69,19 +73,16 @@ def _difficulty_from_sac(sac: str) -> str:
       difficult_alpine_hiking
     """
     sac = (sac or "").strip()
-    easy = {"hiking"}
-    mid = {"mountain_hiking"}
-    hard = {
+    if sac == "hiking":
+        return "쉬움"
+    if sac == "mountain_hiking":
+        return "보통"
+    if sac in {
         "demanding_mountain_hiking",
         "alpine_hiking",
         "demanding_alpine_hiking",
         "difficult_alpine_hiking",
-    }
-    if sac in easy:
-        return "쉬움"
-    if sac in mid:
-        return "보통"
-    if sac in hard:
+    }:
         return "어려움"
     return ""
 
@@ -106,6 +107,7 @@ def overpass_post(
     - 여러 Overpass 서버 로테이션
     """
     last_err: Exception | None = None
+
     for base in OVERPASS_URLS:
         wait_s = 2.0
         for _ in range(max_retries):
@@ -113,6 +115,7 @@ def overpass_post(
                 r = requests.post(
                     base, data=query.encode("utf-8"), headers=UA, timeout=timeout
                 )
+
                 if r.status_code == 429:
                     ra = r.headers.get("Retry-After")
                     if ra:
@@ -126,6 +129,7 @@ def overpass_post(
 
                 r.raise_for_status()
                 return r.json()
+
             except Exception as e:
                 last_err = e
                 time.sleep(min(wait_s, 10.0))
@@ -173,6 +177,7 @@ def relation_to_course(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # members geometry 이어붙이기
     latlon: List[Tuple[float, float]] = []
     members = rel.get("members") or []
+
     for m in members:
         geom = m.get("geometry") or []
         pts = [
@@ -209,7 +214,7 @@ def relation_to_course(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "distance_km": dist_km,
         "difficulty": diff,
         "score": score,
-        "coords": latlon,  # [(lat,lon),...]
+        "coords": latlon,  # [(lat, lon), ...]
         "start_lat": start[0],
         "start_lon": start[1],
         "end_lat": end[0],
@@ -221,7 +226,7 @@ def relation_to_course(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def build_courses(
     bbox: Tuple[float, float, float, float], max_relations: int = 50
 ) -> List[Dict[str, Any]]:
-    """bbox에서 코스 후보 리스트 생성(캐시는 UI 쪽에서)."""
+    """bbox에서 코스 후보 리스트 생성"""
     rels = fetch_trails_relations(bbox, max_relations=max_relations)
     courses: List[Dict[str, Any]] = []
     for r in rels:
@@ -259,6 +264,7 @@ def extract_place(
     name = tags.get("name")
     if not name:
         return None
+
     lat = el.get("lat")
     lon = el.get("lon")
     if lat is None or lon is None:
@@ -301,5 +307,91 @@ def places_near(lat: float, lon: float, radius_m: int) -> List[Dict[str, Any]]:
         p["combined_score"] = round(
             dist_score * 0.6 + (p["quality_score"] / 5) * 0.4, 3
         )
+
     places.sort(key=lambda x: x["combined_score"], reverse=True)
     return places
+
+
+# ===== ORS Elevation (고도 프로파일) =====
+
+
+def _sample_latlon(
+    latlon: List[Tuple[float, float]], max_points: int = 1800
+) -> List[Tuple[float, float]]:
+    """좌표가 너무 많으면 균등 샘플링해서 ORS vertex 제한을 피합니다."""
+    n = len(latlon)
+    if n <= max_points:
+        return latlon
+    step = max(1, n // max_points)
+    sampled = latlon[::step]
+    if sampled and sampled[-1] != latlon[-1]:
+        sampled.append(latlon[-1])
+    return sampled
+
+
+def ors_elevation_line(
+    latlon: List[Tuple[float, float]],
+    api_key: str,
+    dataset: str = "srtm",
+) -> List[Tuple[float, float, float]]:
+    """
+    입력: [(lat, lon), ...] 2D
+    출력: [(lat, lon, elev_m), ...] 3D
+    """
+    if not api_key:
+        raise ValueError("ORS API key is empty")
+
+    latlon = _sample_latlon(latlon, max_points=min(ORS_MAX_VERTICES - 50, 1800))
+    coords_lonlat = [[float(lon), float(lat)] for (lat, lon) in latlon]
+
+    payload = {
+        "format_in": "geojson",
+        "format_out": "geojson",
+        "geometry": {"type": "LineString", "coordinates": coords_lonlat},
+        "dataset": dataset,
+    }
+
+    headers = {
+        "Authorization": api_key,
+        "Content-Type": "application/json",
+        **UA,
+    }
+
+    r = requests.post(ORS_ELEVATION_LINE_URL, json=payload, headers=headers, timeout=60)
+    r.raise_for_status()
+    data = r.json()
+
+    geom = data.get("geometry") or {}
+    coords = geom.get("coordinates") or []
+
+    out: List[Tuple[float, float, float]] = []
+    for c in coords:
+        if not isinstance(c, list) or len(c) < 3:
+            continue
+        lon, lat, ele = c[0], c[1], c[2]
+        out.append((float(lat), float(lon), float(ele)))
+    return out
+
+
+def elevation_profile(
+    latlon: List[Tuple[float, float]], api_key: str
+) -> List[Dict[str, float]]:
+    """
+    고도 그래프용 프로파일:
+      [{'dist_km':..., 'elev_m':...}, ...]
+    """
+    coords3d = ors_elevation_line(latlon, api_key=api_key)
+    if len(coords3d) < 2:
+        return []
+
+    prof: List[Dict[str, float]] = []
+    dist_km = 0.0
+    prof.append({"dist_km": 0.0, "elev_m": float(coords3d[0][2])})
+
+    for i in range(1, len(coords3d)):
+        prev = coords3d[i - 1]
+        cur = coords3d[i]
+        dist_km += haversine_m(prev[0], prev[1], cur[0], cur[1]) / 1000.0
+        prof.append({"dist_km": round(dist_km, 4), "elev_m": float(cur[2])})
+
+    return prof

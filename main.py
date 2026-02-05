@@ -12,23 +12,21 @@ import osm_backend as ob
 
 
 st.set_page_config(
-    page_title="서울 트레킹 코스 추천 (OSM only)",
-    page_icon="🥾",
-    layout="wide",
+    page_title="서울 트레킹 코스 추천 (OSM only)", page_icon="🥾", layout="wide"
 )
 st.title("🥾 서울 트레킹 코스 추천 (OSM만 사용)")
-st.caption("OSM(Overpass)만으로 트레킹 코스 후보 + 난이도 + 종료점 주변 카페/맥주 추천")
+st.caption(
+    "OSM(Overpass)만으로 트레킹 코스 후보 + 난이도 + 종료점 주변 카페/맥주 + (옵션) ORS 고도 그래프"
+)
 
 
 @st.cache_data(ttl=60 * 60)
 def cached_courses(
-    bbox: Tuple[float, float, float, float],
-    max_relations: int,
+    bbox: Tuple[float, float, float, float], max_relations: int
 ) -> pd.DataFrame:
     courses = ob.build_courses(bbox, max_relations=max_relations)
     if not courses:
         return pd.DataFrame()
-
     df = pd.DataFrame(courses)
     df = df.sort_values(["score", "distance_km"], ascending=False).reset_index(
         drop=True
@@ -39,6 +37,11 @@ def cached_courses(
 @st.cache_data(ttl=60 * 20)
 def cached_places(lat: float, lon: float, radius_m: int) -> List[Dict[str, Any]]:
     return ob.places_near(lat, lon, radius_m)
+
+
+@st.cache_data(ttl=60 * 60)
+def cached_elevation_profile(coords_latlon, ors_api_key: str):
+    return ob.elevation_profile(coords_latlon, api_key=ors_api_key)
 
 
 with st.sidebar:
@@ -77,24 +80,26 @@ with st.sidebar:
     st.header("3) 트레킹 후 추천")
     near_radius_m = st.slider("종료점 주변 추천 반경(m)", 100, 2000, 700, 50)
     sip_choice = st.radio(
-        "추천 종류",
-        ["전체", "카페(☕)", "맥주(🍺)"],
-        horizontal=True,
+        "추천 종류", ["전체", "카페(☕)", "맥주(🍺)"], horizontal=True
     )
+
+    st.header("4) 고도 그래프(ORS)")
+    show_elevation = st.checkbox("선택 코스 고도 그래프 보기", value=False)
 
     st.divider()
     st.caption(
         "⚠️ Overpass는 공용 서버라 429(요청 제한)이 날 수 있어요. 잠시 후 재시도하면 대부분 해결됩니다."
+    )
+    st.caption(
+        "⚠️ ORS도 요청 제한이 있을 수 있어요. 고도 그래프는 필요할 때만 켜는 걸 추천해요."
     )
     if st.button("🔄 캐시 초기화", use_container_width=True):
         st.cache_data.clear()
         st.success("캐시 초기화 완료! 새로고침하면 다시 수집합니다.")
 
 
-# ✅ OSM backend로 bbox 생성
 bbox = ob.bbox_from_center(lat, lon, radius_km)
 
-# ✅ 코스 후보 수집
 with st.status("OSM(Overpass)에서 트레킹 코스 후보 수집 중…", expanded=False) as status:
     try:
         df = cached_courses(bbox, max_relations=max_relations)
@@ -209,6 +214,64 @@ st.write(
     }
 )
 
+# ===== ORS 고도 프로파일 =====
+st.subheader("⛰️ 고도(Altitude) 프로파일")
+
+if show_elevation:
+    if "ORS_API_KEY" not in st.secrets:
+        st.warning(
+            "Streamlit Cloud Secrets에 ORS_API_KEY가 없습니다. Settings → Secrets에 등록해 주세요."
+        )
+    else:
+        ors_api_key = st.secrets["ORS_API_KEY"]
+        try:
+            prof = cached_elevation_profile(row["coords"], ors_api_key)
+        except Exception as e:
+            st.error("ORS 고도 요청 중 오류가 발생했습니다. (키/쿼터/네트워크 확인)")
+            st.exception(e)
+            prof = []
+
+        if prof:
+            df_ele = pd.DataFrame(prof)
+
+            ele_chart = (
+                alt.Chart(df_ele)
+                .mark_line()
+                .encode(
+                    x=alt.X("dist_km:Q", title="누적 거리(km)"),
+                    y=alt.Y("elev_m:Q", title="고도(m)"),
+                    tooltip=["dist_km", "elev_m"],
+                )
+            )
+            st.altair_chart(ele_chart, use_container_width=True)
+
+            elev = df_ele["elev_m"].tolist()
+            ascent = 0.0
+            descent = 0.0
+            for i in range(1, len(elev)):
+                delta = elev[i] - elev[i - 1]
+                if delta > 0:
+                    ascent += delta
+                else:
+                    descent += -delta
+
+            st.write(
+                {
+                    "min_m": round(float(df_ele["elev_m"].min()), 1),
+                    "max_m": round(float(df_ele["elev_m"].max()), 1),
+                    "total_ascent_m(추정)": round(ascent, 1),
+                    "total_descent_m(추정)": round(descent, 1),
+                    "points": int(len(df_ele)),
+                }
+            )
+        else:
+            st.info(
+                "고도 데이터를 가져오지 못했어요. ORS 응답이 비어있거나 코스가 너무 짧을 수 있어요."
+            )
+else:
+    st.caption("사이드바에서 '선택 코스 고도 그래프 보기'를 체크하면 표시됩니다.")
+
+# ===== 트레킹 후 추천 =====
 st.subheader("☕/🍺 트레킹 후 추천 TOP 10 (종료점 기준)")
 try:
     places = cached_places(
