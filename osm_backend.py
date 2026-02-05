@@ -1,9 +1,10 @@
-# osm_backend.py
 from __future__ import annotations
 
 import math
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import xml.etree.ElementTree as ET
 
 import requests
 
@@ -25,7 +26,16 @@ OVERPASS_URLS = [
 ORS_ELEVATION_LINE_URL = "https://api.openrouteservice.org/elevation/line"
 ORS_MAX_VERTICES = 2000
 
+# ===== 공공데이터(GPX) 매칭 설정 =====
+_OFFICIAL_MATCH_THRESHOLD_M = 250
 
+
+def set_official_match_threshold(threshold_m: int) -> None:
+    global _OFFICIAL_MATCH_THRESHOLD_M
+    _OFFICIAL_MATCH_THRESHOLD_M = max(10, int(threshold_m))
+
+
+# ===== 기본 유틸 =====
 def bbox_from_center(
     lat: float, lon: float, radius_km: float
 ) -> Tuple[float, float, float, float]:
@@ -88,6 +98,7 @@ def difficulty_label(sac_hint: str, distance_km: float) -> str:
     return "어려움"
 
 
+# ===== Overpass =====
 def overpass_post(
     query: str, timeout: int = 60, max_retries: int = 3
 ) -> Dict[str, Any]:
@@ -151,7 +162,183 @@ def fetch_trails_relations(
     return rels[:max_relations]
 
 
-def relation_to_course(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+# ===== 공공데이터(GPX) 인덱스 =====
+_GPX_NS = {"g": "http://www.topografix.com/GPX/1/1"}
+
+
+def _bbox_intersects(
+    b1: Tuple[float, float, float, float],
+    b2: Tuple[float, float, float, float],
+) -> bool:
+    # (south, west, north, east)
+    s1, w1, n1, e1 = b1
+    s2, w2, n2, e2 = b2
+    return not (e1 < w2 or e2 < w1 or n1 < s2 or n2 < s1)
+
+
+def _parse_gpx_bounds_and_endpoints(gpx_path: Path) -> Optional[Dict[str, Any]]:
+    """
+    GPX에서 metadata/bounds + 트랙 시작/끝점만 빠르게 파싱
+    반환 dict:
+      name, start_lat, start_lon, end_lat, end_lon, bbox(s,w,n,e)
+    """
+    try:
+        root = ET.parse(gpx_path).getroot()
+    except Exception:
+        return None
+
+    meta = root.find("g:metadata", _GPX_NS)
+    b = meta.find("g:bounds", _GPX_NS) if meta is not None else None
+    if b is None or not b.attrib:
+        return None
+
+    try:
+        minlat = float(b.attrib.get("minlat"))
+        minlon = float(b.attrib.get("minlon"))
+        maxlat = float(b.attrib.get("maxlat"))
+        maxlon = float(b.attrib.get("maxlon"))
+    except Exception:
+        return None
+
+    trk = root.find("g:trk", _GPX_NS)
+    if trk is None:
+        return None
+    seg = trk.find("g:trkseg", _GPX_NS)
+    if seg is None:
+        return None
+    pts = seg.findall("g:trkpt", _GPX_NS)
+    if len(pts) < 2:
+        return None
+
+    try:
+        s_lat = float(pts[0].attrib["lat"])
+        s_lon = float(pts[0].attrib["lon"])
+        e_lat = float(pts[-1].attrib["lat"])
+        e_lon = float(pts[-1].attrib["lon"])
+    except Exception:
+        return None
+
+    # 이름 우선순위: wpt name 1->last, 없으면 파일명
+    wpts = root.findall("g:wpt", _GPX_NS)
+    if wpts:
+        w1 = (wpts[0].findtext("g:name", default="", namespaces=_GPX_NS) or "").strip()
+        w2 = (wpts[-1].findtext("g:name", default="", namespaces=_GPX_NS) or "").strip()
+        name = f"{w1} → {w2}".strip(" →")
+    else:
+        name = gpx_path.stem
+
+    return {
+        "name": name,
+        "start_lat": s_lat,
+        "start_lon": s_lon,
+        "end_lat": e_lat,
+        "end_lon": e_lon,
+        "bbox": (minlat, minlon, maxlat, maxlon),  # (s,w,n,e)
+        "path": str(gpx_path),
+    }
+
+
+def load_official_gpx_index(
+    data_dir: str,
+    bbox: Optional[Tuple[float, float, float, float]] = None,
+    max_files: int = 1500,
+) -> List[Dict[str, Any]]:
+    """
+    data_dir 아래의 .gpx를 스캔해서 '공식 구간 인덱스' 생성
+    - bbox가 주어지면 GPX bounds 교차 여부로 1차 필터링(빠름)
+    - max_files까지 로드(속도/메모리 제어)
+    """
+    base = Path(data_dir)
+    if not base.exists():
+        return []
+
+    gpx_files = list(base.rglob("*.gpx"))
+    out: List[Dict[str, Any]] = []
+
+    picked = 0
+    for p in gpx_files:
+        if picked >= max_files:
+            break
+
+        info = _parse_gpx_bounds_and_endpoints(p)
+        if not info:
+            continue
+
+        if bbox is not None:
+            if not _bbox_intersects(bbox, info["bbox"]):
+                continue
+
+        out.append(info)
+        picked += 1
+
+    return out
+
+
+def match_official_by_endpoints(
+    course_start: Tuple[float, float],
+    course_end: Tuple[float, float],
+    official_index: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    OSM 코스 start/end가 공식 GPX 구간 start/end와 가까우면 매칭
+    - 방향 반대 가능성 고려(정방향/역방향)
+    - trust_score: 0~30점 (가까울수록 높음)
+    """
+    if not official_index:
+        return {
+            "matched": False,
+            "trust_score": 0.0,
+            "nearest_m": None,
+            "official_name": None,
+        }
+
+    s_lat, s_lon = course_start
+    e_lat, e_lon = course_end
+
+    best_nearest = 1e18
+    best_name = None
+
+    for r in official_index:
+        os_lat, os_lon = float(r["start_lat"]), float(r["start_lon"])
+        oe_lat, oe_lon = float(r["end_lat"]), float(r["end_lon"])
+
+        d1 = (
+            haversine_m(s_lat, s_lon, os_lat, os_lon)
+            + haversine_m(e_lat, e_lon, oe_lat, oe_lon)
+        ) / 2.0
+        d2 = (
+            haversine_m(s_lat, s_lon, oe_lat, oe_lon)
+            + haversine_m(e_lat, e_lon, os_lat, os_lon)
+        ) / 2.0
+        nearest = min(d1, d2)
+
+        if nearest < best_nearest:
+            best_nearest = nearest
+            best_name = r.get("name")
+
+    th = float(_OFFICIAL_MATCH_THRESHOLD_M)
+    if best_nearest <= th:
+        trust = 5.0 + (th - best_nearest) / th * 25.0  # 5~30
+        return {
+            "matched": True,
+            "trust_score": round(float(trust), 2),
+            "nearest_m": round(float(best_nearest), 1),
+            "official_name": best_name,
+        }
+
+    return {
+        "matched": False,
+        "trust_score": 0.0,
+        "nearest_m": round(float(best_nearest), 1),
+        "official_name": best_name,
+    }
+
+
+# ===== 코스 생성(공식 매칭 포함) =====
+def relation_to_course(
+    rel: Dict[str, Any],
+    official_index: Optional[List[Dict[str, Any]]] = None,
+) -> Optional[Dict[str, Any]]:
     tags = rel.get("tags") or {}
     name = _safe_get(tags, "name", "")
     if not name:
@@ -171,7 +358,6 @@ def relation_to_course(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         ]
         if len(pts) >= 2:
             if latlon:
-                # 이어붙일 때 너무 멀면 그냥 붙임
                 if haversine_m(latlon[-1][0], latlon[-1][1], pts[0][0], pts[0][1]) < 5:
                     latlon.extend(pts[1:])
                 else:
@@ -190,14 +376,24 @@ def relation_to_course(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     start = latlon[0]
     end = latlon[-1]
 
-    score = round(math.log1p(len(members)) * 0.8 + math.log1p(dist_km) * 0.6, 3)
+    score_osm = round(math.log1p(len(members)) * 0.8 + math.log1p(dist_km) * 0.6, 3)
+
+    # ✅ 공공데이터 매칭 가산점
+    m = match_official_by_endpoints(start, end, official_index or [])
+    trust_score = float(m["trust_score"])
+    score_final = round(score_osm + trust_score, 3)
 
     return {
         "course_id": f"{name} ({dist_km}km)",
         "name": name,
         "distance_km": dist_km,
         "difficulty": diff,
-        "score": score,
+        "score": score_final,  # 최종 점수(신뢰도 포함)
+        "score_osm": score_osm,  # 참고용
+        "trust_score": trust_score,
+        "official_matched": bool(m["matched"]),
+        "official_nearest_m": m["nearest_m"],
+        "official_name": m["official_name"],
         "coords": latlon,  # [(lat, lon), ...]
         "start_lat": start[0],
         "start_lon": start[1],
@@ -208,12 +404,14 @@ def relation_to_course(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def build_courses(
-    bbox: Tuple[float, float, float, float], max_relations: int = 50
+    bbox: Tuple[float, float, float, float],
+    max_relations: int = 50,
+    official_index: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     rels = fetch_trails_relations(bbox, max_relations=max_relations)
     courses: List[Dict[str, Any]] = []
     for r in rels:
-        c = relation_to_course(r)
+        c = relation_to_course(r, official_index=official_index)
         if c:
             courses.append(c)
 
@@ -226,6 +424,7 @@ def build_courses(
     return list(dedup.values())
 
 
+# ===== 주변 장소(카페/펍) =====
 def overpass_places_query(lat: float, lon: float, radius_m: int) -> str:
     return f"""
     [out:json][timeout:45];
@@ -295,8 +494,6 @@ def places_near(lat: float, lon: float, radius_m: int) -> List[Dict[str, Any]]:
 
 
 # ===== ORS 고도 프로파일 =====
-
-
 def _sample_latlon(
     latlon: List[Tuple[float, float]], max_points: int = 1800
 ) -> List[Tuple[float, float]]:

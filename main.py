@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import altair as alt
@@ -116,12 +117,29 @@ def judge_outdoor(w):
     }
 
 
+# ====== 공공데이터(GPX) 인덱스 로드 ======
+DATA_DIR = Path(__file__).parent / "data"
+
+
+@st.cache_data(ttl=60 * 60 * 12)  # 12시간 캐시
+def cached_official_index(
+    data_dir_str: str, bbox: Tuple[float, float, float, float], max_files: int
+) -> List[Dict[str, Any]]:
+    return ob.load_official_gpx_index(data_dir_str, bbox=bbox, max_files=max_files)
+
+
 # ====== Cached backend ======
 @st.cache_data(ttl=60 * 60)
 def cached_courses(
-    bbox: Tuple[float, float, float, float], max_relations: int
+    bbox: Tuple[float, float, float, float],
+    max_relations: int,
+    official_key: str,
+    official_index: List[Dict[str, Any]],
 ) -> pd.DataFrame:
-    courses = ob.build_courses(bbox, max_relations=max_relations)
+    _ = official_key  # 캐시 키
+    courses = ob.build_courses(
+        bbox, max_relations=max_relations, official_index=official_index
+    )
     if not courses:
         return pd.DataFrame()
     df = pd.DataFrame(courses)
@@ -175,6 +193,13 @@ with st.sidebar:
     topk = st.slider("추천 코스 개수", 3, 10, 4)
     max_relations = st.slider("후보 탐색량(Overpass 부담)", 20, 80, 50, 5)
 
+    st.header("공공데이터(GPX) 반영")
+    official_on = st.toggle("공공데이터 매칭 점수 가산", value=True)
+    max_gpx_files = st.slider(
+        "GPX 인덱싱 최대 파일 수(속도/정확도)", 200, 4000, 1500, 100
+    )
+    match_threshold_m = st.slider("매칭 허용 거리(m)", 100, 800, 250, 50)
+
     st.header("3) 트레킹 후 추천")
     near_radius_m = st.slider("주변 추천 반경(m)", 100, 2000, 700, 50)
     sip_choice = st.radio(
@@ -183,9 +208,6 @@ with st.sidebar:
 
     st.header("4) 고도 그래프")
     show_elevation = st.checkbox("선택 코스 고도 그래프 보기", value=False)
-
-   
-
 
     st.divider()
 
@@ -197,9 +219,27 @@ with st.sidebar:
 # ====== Load courses ======
 bbox = ob.bbox_from_center(lat, lon, radius_km)
 
+# 공공데이터 인덱스 로드(지역 bbox로 빠르게 필터링)
+official_index: List[Dict[str, Any]] = []
+official_key = "official_off"
+
+if official_on:
+    if not DATA_DIR.exists():
+        st.warning("data 폴더를 찾지 못했어요. project/data/ 에 GPX를 넣어주세요.")
+    else:
+        official_index = cached_official_index(str(DATA_DIR), bbox, int(max_gpx_files))
+        # 매칭 임계값은 backend에서 참조하도록 global setter로 전달
+        ob.set_official_match_threshold(int(match_threshold_m))
+        official_key = f"official_on_{DATA_DIR.stat().st_mtime}_{len(official_index)}_{match_threshold_m}"
+
 with st.status("트레킹 코스 후보 수집 중…", expanded=False) as status:
     try:
-        df = cached_courses(bbox, max_relations=max_relations)
+        df = cached_courses(
+            bbox,
+            max_relations=max_relations,
+            official_key=official_key,
+            official_index=official_index if official_on else [],
+        )
         status.update(label=f"코스 후보 생성 완료 ({len(df)}개)", state="complete")
     except Exception as e:
         status.update(label="코스 후보 수집 실패", state="error")
@@ -225,22 +265,23 @@ if df_use.empty:
     st.stop()
 
 df_use = df_use.sort_values("score", ascending=False).head(topk).reset_index(drop=True)
-df_chart = df_use[["name", "difficulty", "distance_km", "members", "score"]].copy()
 
-# ====== (중요) 선택 코스를 지도/차트보다 먼저 고르게 해서,
-#       날씨를 "코스 후보 생성완료"와 "추천 코스 지도" 사이에 표시 가능하게 함 ======
+# 차트용(최종 score 기준)
+df_chart = df_use[
+    ["name", "difficulty", "distance_km", "members", "trust_score", "score"]
+].copy()
+
+# ====== 선택 코스 ======
 selected = st.selectbox("상세로 볼 코스 선택", df_use["name"].tolist(), index=0)
 row = df_use[df_use["name"] == selected].iloc[0].to_dict()
 
-# ====== Weather / Outdoor score (항상 메인에 표시, 시작점 기준) ======
+# ====== Weather / Outdoor score ======
 st.caption("🌦️ 오늘 날씨/야외 적합도 (선택 코스 시작점 기준)")
 
 if not OPENWEATHER_API_KEY:
     st.info("OPENWEATHER_API_KEY가 Secrets에 없어서 날씨를 표시할 수 없어요.")
 else:
-    # ✅ 시작점 기준 고정
     wlat, wlon = float(row["start_lat"]), float(row["start_lon"])
-
     try:
         w = get_weather_openweather(wlat, wlon, OPENWEATHER_API_KEY)
         judge = judge_outdoor(w)
@@ -270,6 +311,15 @@ else:
         st.warning("날씨 API 호출에 실패했어요. 잠시 후 다시 시도해 주세요.")
         st.exception(e)
 
+# ====== 공공데이터 매칭 상태 ======
+if official_on:
+    if row.get("official_matched"):
+        st.success(
+            f"✅ 공공데이터(GPX) 매칭됨: {row.get('official_name','-')} "
+            f"(≈{row.get('official_nearest_m','-')}m, +{row.get('trust_score',0)})"
+        )
+    else:
+        st.caption("공공데이터(GPX) 매칭 없음(=OSM 기반 후보)")
 
 # ====== Map + Panel ======
 col_map, col_panel = st.columns([1.35, 1])
@@ -278,7 +328,6 @@ with col_map:
     st.subheader("🗺️ 추천 코스 지도")
     m = folium.Map(location=[lat, lon], zoom_start=12, tiles="OpenStreetMap")
 
-    # bbox 표시
     s, w_, n, e = bbox
     folium.Rectangle(
         bounds=[[s, w_], [n, e]], color="#0984e3", weight=2, fill=False
@@ -301,7 +350,6 @@ with col_map:
         latlon = r["coords"]
         color = colors[i % len(colors)]
 
-        # 선택 코스는 더 두껍게 강조
         weight = 8 if r["name"] == selected_name else 6
         opacity = 0.95 if r["name"] == selected_name else 0.85
 
@@ -323,7 +371,7 @@ with col_map:
 
 with col_panel:
     st.subheader(f"🏅 추천 Top {len(df_use)}")
-    show_cols = ["name", "difficulty", "distance_km", "members", "score"]
+    show_cols = ["name", "difficulty", "distance_km", "members", "trust_score", "score"]
     st.dataframe(df_use[show_cols], use_container_width=True, hide_index=True)
 
     chart = (
@@ -331,8 +379,15 @@ with col_panel:
         .mark_bar()
         .encode(
             x=alt.X("name:N", title="코스"),
-            y=alt.Y("distance_km:Q", title="거리(km)"),
-            tooltip=["name", "difficulty", "distance_km", "members", "score"],
+            y=alt.Y("score:Q", title="최종 점수(신뢰도 포함)"),
+            tooltip=[
+                "name",
+                "difficulty",
+                "distance_km",
+                "members",
+                "trust_score",
+                "score",
+            ],
         )
     )
     st.altair_chart(chart, use_container_width=True)
