@@ -12,7 +12,9 @@ import osm_backend as ob
 
 
 st.set_page_config(
-    page_title="서울 트레킹 코스 추천 (OSM only)", page_icon="🥾", layout="wide"
+    page_title="서울 트레킹 코스 추천 (OSM only)",
+    page_icon="🥾",
+    layout="wide",
 )
 st.title("🥾 서울 트레킹 코스 추천 (OSM만 사용)")
 st.caption("OSM(Overpass)만으로 트레킹 코스 후보 + 난이도 + 종료점 주변 카페/맥주 추천")
@@ -20,11 +22,13 @@ st.caption("OSM(Overpass)만으로 트레킹 코스 후보 + 난이도 + 종료�
 
 @st.cache_data(ttl=60 * 60)
 def cached_courses(
-    bbox: Tuple[float, float, float, float], max_relations: int
+    bbox: Tuple[float, float, float, float],
+    max_relations: int,
 ) -> pd.DataFrame:
     courses = ob.build_courses(bbox, max_relations=max_relations)
     if not courses:
         return pd.DataFrame()
+
     df = pd.DataFrame(courses)
     df = df.sort_values(["score", "distance_km"], ascending=False).reset_index(
         drop=True
@@ -73,7 +77,9 @@ with st.sidebar:
     st.header("3) 트레킹 후 추천")
     near_radius_m = st.slider("종료점 주변 추천 반경(m)", 100, 2000, 700, 50)
     sip_choice = st.radio(
-        "추천 종류", ["전체", "카페(☕)", "맥주(🍺)"], horizontal=True
+        "추천 종류",
+        ["전체", "카페(☕)", "맥주(🍺)"],
+        horizontal=True,
     )
 
     st.divider()
@@ -85,9 +91,10 @@ with st.sidebar:
         st.success("캐시 초기화 완료! 새로고침하면 다시 수집합니다.")
 
 
+# ✅ OSM backend로 bbox 생성
 bbox = ob.bbox_from_center(lat, lon, radius_km)
 
-<<<<<<< HEAD
+# ✅ 코스 후보 수집
 with st.status("OSM(Overpass)에서 트레킹 코스 후보 수집 중…", expanded=False) as status:
     try:
         df = cached_courses(bbox, max_relations=max_relations)
@@ -113,33 +120,6 @@ if df.empty:
             }
         )
     st.stop()
-=======
-bbox = bbox_from_center(lat, lon, radius_km)
-
-# with st.status(
-#     "공공데이터에서 등산로(트레킹 코스 후보) 가져오는 중…", expanded=False
-# ) as status:
-#     try:
-#         feats = vworld_get_trails(api_key, bbox)
-#     except Exception as e:
-#         st.error(f"VWorld 호출 실패: {e}")
-#         st.stop()
-
-#     records = []
-#     for f in feats:
-#         r = normalize_feature(f)
-#         if r:
-#             records.append(r)
-
-#     courses = aggregate_courses(records)
-#     status.update(label=f"코스 후보 생성 완료 ({len(courses)}개)", state="complete")
-
-# if courses.empty:
-#     st.info(
-#         "선택한 지역에서 코스 후보를 찾지 못했습니다. 반경을 늘리거나 다른 지역을 선택해 보세요."
-#     )
-#     st.stop()
->>>>>>> 96525c5bfd5ce43bcbfbc1ac9cb17068a0723d73
 
 # 난이도 필터
 df_use = df.copy()
@@ -176,19 +156,21 @@ with col_map:
         "#fdcb6e",
     ]
 
-    for i, row in df_use.iterrows():
-        latlon = row["coords"]
+    for i, r in df_use.iterrows():
+        latlon = r["coords"]
         color = colors[i % len(colors)]
+
         folium.PolyLine(
             latlon,
             color=color,
             weight=6,
             opacity=0.85,
-            tooltip=f"{i+1}위 {row['name']}",
+            tooltip=f"{i+1}위 {r['name']}",
         ).add_to(m)
+
         folium.Marker(
-            location=[row["end_lat"], row["end_lon"]],
-            tooltip=f"{i+1}위 종료점 · {row['difficulty']} · {row['distance_km']}km",
+            location=[r["end_lat"], r["end_lon"]],
+            tooltip=f"{i+1}위 종료점 · {r['difficulty']} · {r['distance_km']}km",
             icon=folium.Icon(color="green", icon="flag"),
         ).add_to(m)
 
