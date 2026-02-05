@@ -184,9 +184,9 @@ with st.sidebar:
     st.header("4) 고도 그래프")
     show_elevation = st.checkbox("선택 코스 고도 그래프 보기", value=False)
 
-    st.header("5) 오늘 날씨/야외 적합도")
-    show_weather = st.checkbox("날씨/야외 적합도 보기", value=True)
-    use_end_weather = st.checkbox("선택 코스 종료점 기준으로 보기", value=True)
+    st.header("5) 날씨 기준")
+    use_end_weather = st.checkbox("선택 코스 종료점 기준", value=True)
+
 
     st.divider()
 
@@ -234,48 +234,41 @@ selected = st.selectbox("상세로 볼 코스 선택", df_use["name"].tolist(), 
 row = df_use[df_use["name"] == selected].iloc[0].to_dict()
 
 # ====== Weather / Outdoor score (원하는 위치) ======
-if show_weather:
-    if not OPENWEATHER_API_KEY:
-        st.info("OPENWEATHER_API_KEY가 Secrets에 없어서 날씨를 표시할 수 없어요.")
-    else:
-        wlat, wlon = (
-            (float(row["end_lat"]), float(row["end_lon"]))
-            if use_end_weather
-            else (float(lat), float(lon))
-        )
-        try:
-            w = get_weather_openweather(wlat, wlon, OPENWEATHER_API_KEY)
-            judge = judge_outdoor(w)
+# ====== Weather / Outdoor score (항상 메인에 표시) ======
+st.caption(
+    "🌦️ 오늘 날씨/야외 적합도 "
+    + ("(선택 코스 종료점 기준)" if use_end_weather else "(지역 중심 기준)")
+)
 
-            # 제목처럼 보이게 한 줄 캡션
-            st.caption(
-                "🌦️ 오늘 날씨/야외 적합도 "
-                + ("(선택 코스 종료점 기준)" if use_end_weather else "(지역 중심 기준)")
-            )
+if not OPENWEATHER_API_KEY:
+    st.info("OPENWEATHER_API_KEY가 Secrets에 없어서 날씨를 표시할 수 없어요.")
+else:
+    wlat, wlon = (
+        (float(row["end_lat"]), float(row["end_lon"]))
+        if use_end_weather
+        else (float(lat), float(lon))
+    )
+    try:
+        w = get_weather_openweather(wlat, wlon, OPENWEATHER_API_KEY)
+        judge = judge_outdoor(w)
 
-            if judge["level"] == "good":
-                st.success(
-                    f"🌤️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
-                )
-            elif judge["level"] == "warn":
-                st.warning(
-                    f"⛅ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
-                )
-            else:
-                st.error(
-                    f"🌧️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
-                )
+        if judge["level"] == "good":
+            st.success(f"🌤️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}")
+        elif judge["level"] == "warn":
+            st.warning(f"⛅ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}")
+        else:
+            st.error(f"🌧️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}")
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("기온(°C)", f"{judge['temp']:.1f}")
-            c2.metric("체감(°C)", f"{judge['feels']:.1f}")
-            c3.metric("바람(m/s)", f"{judge['wind_speed']:.1f}")
-            c4.metric("강수(mm/h)", f"{judge['precip_per_h']:.1f}")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("기온(°C)", f"{judge['temp']:.1f}")
+        c2.metric("체감(°C)", f"{judge['feels']:.1f}")
+        c3.metric("바람(m/s)", f"{judge['wind_speed']:.1f}")
+        c4.metric("강수(mm/h)", f"{judge['precip_per_h']:.1f}")
 
-            st.progress(int(judge["score"]))
-        except Exception as e:
-            st.warning("날씨 API 호출에 실패했어요. 잠시 후 다시 시도해 주세요.")
-            st.exception(e)
+        st.progress(int(judge["score"]))
+    except Exception as e:
+        st.warning("날씨 API 호출에 실패했어요. 잠시 후 다시 시도해 주세요.")
+        st.exception(e)
 
 # ====== Map + Panel ======
 col_map, col_panel = st.columns([1.35, 1])
