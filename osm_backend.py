@@ -1,5 +1,4 @@
 # osm_backend.py
-# OSM(Overpass) 기반 트레킹 코스/주변 장소 추천 로직 + ORS 고도(Altitude) 프로파일
 from __future__ import annotations
 
 import math
@@ -15,29 +14,29 @@ UA = {
     )
 }
 
-# Overpass는 공용 서버라 429(요청 제한) 발생 가능 → 엔드포인트 로테이션
+# Overpass 공용 서버(429 대비 로테이션)
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.nchc.org.tw/api/interpreter",
 ]
 
-# ORS(OpenRouteService) Elevation(고도) API
+# ORS Elevation(고도)
 ORS_ELEVATION_LINE_URL = "https://api.openrouteservice.org/elevation/line"
-ORS_MAX_VERTICES = 2000  # vertex 제한이 있을 수 있어 안전하게 샘플링
+ORS_MAX_VERTICES = 2000
 
 
 def bbox_from_center(
     lat: float, lon: float, radius_km: float
 ) -> Tuple[float, float, float, float]:
-    """Overpass bbox: (south, west, north, east)"""
+    """bbox: (south, west, north, east)"""
     d = radius_km / 111.0
     return (lat - d, lon - d, lat + d, lon + d)
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371000.0
-    p = math.pi / 180
+    p = math.pi / 180.0
     dlat = (lat2 - lat1) * p
     dlon = (lon2 - lon1) * p
     a = (math.sin(dlat / 2) ** 2) + math.cos(lat1 * p) * math.cos(lat2 * p) * (
@@ -58,20 +57,11 @@ def polyline_length_km(latlon: List[Tuple[float, float]]) -> float:
 
 
 def _safe_get(d: Dict[str, Any], k: str, default: str = "") -> str:
-    v = d.get(k) or ""
+    v = d.get(k) if isinstance(d, dict) else None
     return str(v).strip() if v is not None else default
 
 
 def _difficulty_from_sac(sac: str) -> str:
-    """
-    OSM sac_scale 예:
-      hiking
-      mountain_hiking
-      demanding_mountain_hiking
-      alpine_hiking
-      demanding_alpine_hiking
-      difficult_alpine_hiking
-    """
     sac = (sac or "").strip()
     if sac == "hiking":
         return "쉬움"
@@ -88,9 +78,9 @@ def _difficulty_from_sac(sac: str) -> str:
 
 
 def difficulty_label(sac_hint: str, distance_km: float) -> str:
-    from_sac = _difficulty_from_sac(sac_hint)
-    if from_sac:
-        return from_sac
+    d = _difficulty_from_sac(sac_hint)
+    if d:
+        return d
     if distance_km < 5:
         return "쉬움"
     if distance_km < 10:
@@ -102,9 +92,9 @@ def overpass_post(
     query: str, timeout: int = 60, max_retries: int = 3
 ) -> Dict[str, Any]:
     """
-    429(Too Many Requests) 대응:
-    - 429면 지수 백오프 + Retry-After 존중
-    - 여러 Overpass 서버 로테이션
+    429 대응:
+    - 429면 백오프 + Retry-After(있으면 반영)
+    - 서버 로테이션
     """
     last_err: Exception | None = None
 
@@ -143,10 +133,6 @@ def overpass_post(
 def fetch_trails_relations(
     bbox: Tuple[float, float, float, float], max_relations: int = 50
 ) -> List[Dict[str, Any]]:
-    """
-    relation["route"="hiking"|"foot"] 기반 코스 후보.
-    out body geom; 로 relation members geometry까지 받으려 시도.
-    """
     s, w, n, e = bbox
     q = f"""
     [out:json][timeout:60];
@@ -160,7 +146,6 @@ def fetch_trails_relations(
     elements = data.get("elements", [])
     rels = [el for el in elements if el.get("type") == "relation"]
 
-    # 이름 있는 relation 우선
     rels_named = [r for r in rels if (r.get("tags") or {}).get("name")]
     rels = rels_named if rels_named else rels
     return rels[:max_relations]
@@ -174,7 +159,6 @@ def relation_to_course(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     sac = _safe_get(tags, "sac_scale", "")
 
-    # members geometry 이어붙이기
     latlon: List[Tuple[float, float]] = []
     members = rel.get("members") or []
 
@@ -186,7 +170,8 @@ def relation_to_course(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             if "lat" in p and "lon" in p
         ]
         if len(pts) >= 2:
-            if latlon and pts:
+            if latlon:
+                # 이어붙일 때 너무 멀면 그냥 붙임
                 if haversine_m(latlon[-1][0], latlon[-1][1], pts[0][0], pts[0][1]) < 5:
                     latlon.extend(pts[1:])
                 else:
@@ -205,7 +190,6 @@ def relation_to_course(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     start = latlon[0]
     end = latlon[-1]
 
-    # 간단 점수: members 수 + 거리
     score = round(math.log1p(len(members)) * 0.8 + math.log1p(dist_km) * 0.6, 3)
 
     return {
@@ -226,7 +210,6 @@ def relation_to_course(rel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def build_courses(
     bbox: Tuple[float, float, float, float], max_relations: int = 50
 ) -> List[Dict[str, Any]]:
-    """bbox에서 코스 후보 리스트 생성"""
     rels = fetch_trails_relations(bbox, max_relations=max_relations)
     courses: List[Dict[str, Any]] = []
     for r in rels:
@@ -234,8 +217,8 @@ def build_courses(
         if c:
             courses.append(c)
 
-    # 중복 이름 제거(점수 높은 것 우선)
     courses.sort(key=lambda x: (x["score"], x["distance_km"]), reverse=True)
+
     dedup: Dict[str, Dict[str, Any]] = {}
     for c in courses:
         if c["name"] not in dedup:
@@ -274,7 +257,6 @@ def extract_place(
     category = "coffee" if amenity == "cafe" else "beer"
     dist = int(haversine_m(origin_lat, origin_lon, float(lat), float(lon)))
 
-    # 간단 품질 점수(0~5)
     quality = 0
     if tags.get("opening_hours"):
         quality += 2
@@ -312,13 +294,12 @@ def places_near(lat: float, lon: float, radius_m: int) -> List[Dict[str, Any]]:
     return places
 
 
-# ===== ORS Elevation (고도 프로파일) =====
+# ===== ORS 고도 프로파일 =====
 
 
 def _sample_latlon(
     latlon: List[Tuple[float, float]], max_points: int = 1800
 ) -> List[Tuple[float, float]]:
-    """좌표가 너무 많으면 균등 샘플링해서 ORS vertex 제한을 피합니다."""
     n = len(latlon)
     if n <= max_points:
         return latlon
@@ -335,11 +316,11 @@ def ors_elevation_line(
     dataset: str = "srtm",
 ) -> List[Tuple[float, float, float]]:
     """
-    입력: [(lat, lon), ...] 2D
-    출력: [(lat, lon, elev_m), ...] 3D
+    입력: [(lat, lon), ...]
+    출력: [(lat, lon, elev_m), ...]
     """
     if not api_key:
-        raise ValueError("ORS API key is empty")
+        raise ValueError("ORS_API_KEY is empty")
 
     latlon = _sample_latlon(latlon, max_points=min(ORS_MAX_VERTICES - 50, 1800))
     coords_lonlat = [[float(lon), float(lat)] for (lat, lon) in latlon]
@@ -350,12 +331,7 @@ def ors_elevation_line(
         "geometry": {"type": "LineString", "coordinates": coords_lonlat},
         "dataset": dataset,
     }
-
-    headers = {
-        "Authorization": api_key,
-        "Content-Type": "application/json",
-        **UA,
-    }
+    headers = {"Authorization": api_key, "Content-Type": "application/json", **UA}
 
     r = requests.post(ORS_ELEVATION_LINE_URL, json=payload, headers=headers, timeout=60)
     r.raise_for_status()
@@ -366,20 +342,15 @@ def ors_elevation_line(
 
     out: List[Tuple[float, float, float]] = []
     for c in coords:
-        if not isinstance(c, list) or len(c) < 3:
-            continue
-        lon, lat, ele = c[0], c[1], c[2]
-        out.append((float(lat), float(lon), float(ele)))
+        if isinstance(c, list) and len(c) >= 3:
+            lon, lat, ele = c[0], c[1], c[2]
+            out.append((float(lat), float(lon), float(ele)))
     return out
 
 
 def elevation_profile(
     latlon: List[Tuple[float, float]], api_key: str
 ) -> List[Dict[str, float]]:
-    """
-    고도 그래프용 프로파일:
-      [{'dist_km':..., 'elev_m':...}, ...]
-    """
     coords3d = ors_elevation_line(latlon, api_key=api_key)
     if len(coords3d) < 2:
         return []
