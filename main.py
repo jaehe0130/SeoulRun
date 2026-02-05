@@ -453,29 +453,29 @@ if not api_key:
 
 bbox = bbox_from_center(lat, lon, radius_km)
 
-with st.status(
-    "공공데이터에서 등산로(트레킹 코스 후보) 가져오는 중…", expanded=False
-) as status:
-    try:
-        feats = vworld_get_trails(api_key, bbox)
-    except Exception as e:
-        st.error(f"VWorld 호출 실패: {e}")
-        st.stop()
+# with st.status(
+#     "공공데이터에서 등산로(트레킹 코스 후보) 가져오는 중…", expanded=False
+# ) as status:
+#     try:
+#         feats = vworld_get_trails(api_key, bbox)
+#     except Exception as e:
+#         st.error(f"VWorld 호출 실패: {e}")
+#         st.stop()
 
-    records = []
-    for f in feats:
-        r = normalize_feature(f)
-        if r:
-            records.append(r)
+#     records = []
+#     for f in feats:
+#         r = normalize_feature(f)
+#         if r:
+#             records.append(r)
 
-    courses = aggregate_courses(records)
-    status.update(label=f"코스 후보 생성 완료 ({len(courses)}개)", state="complete")
+#     courses = aggregate_courses(records)
+#     status.update(label=f"코스 후보 생성 완료 ({len(courses)}개)", state="complete")
 
-if courses.empty:
-    st.info(
-        "선택한 지역에서 코스 후보를 찾지 못했습니다. 반경을 늘리거나 다른 지역을 선택해 보세요."
-    )
-    st.stop()
+# if courses.empty:
+#     st.info(
+#         "선택한 지역에서 코스 후보를 찾지 못했습니다. 반경을 늘리거나 다른 지역을 선택해 보세요."
+#     )
+#     st.stop()
 
 # 난이도 필터
 if diff_filter != "전체":
