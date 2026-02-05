@@ -11,15 +11,8 @@ from streamlit_folium import st_folium
 
 import osm_backend as ob
 
-
-st.set_page_config(
-    page_title="서울 트레킹 코스 추천 (OSM only)", page_icon="🥾", layout="wide"
-)
-st.title("🥾 서울 트레킹 코스 추천 (OSM만 사용)")
-st.caption(
-    "OSM(Overpass) 코스 추천 + (옵션) ORS 고도 그래프 + 트레킹 후 카페/맥주 + 오늘 날씨/야외 적합도"
-)
-
+st.set_page_config(page_title="트레킹 코스 추천", page_icon="🥾", layout="wide")
+st.title("🥾 트레킹 코스 추천")
 
 # ====== Weather(OpenWeather) ======
 OPENWEATHER_API_KEY = st.secrets.get("OPENWEATHER_API_KEY", "")
@@ -41,7 +34,7 @@ def get_weather_openweather(lat: float, lon: float, api_key: str):
 
 
 def judge_outdoor(w):
-    """오늘 야외(런닝/트레킹) 적합도 간단 판정"""
+    """야외(런닝/트레킹) 적합도 판정"""
     main = w.get("main", {})
     wind = w.get("wind", {})
     weather = (w.get("weather") or [{}])[0]
@@ -82,7 +75,7 @@ def judge_outdoor(w):
         reasons.append(f"너무 추움(체감 {feels:.0f}°C)")
     elif feels <= 0:
         score -= 18
-        reasons.append(f"추운 편(체감 {feels:.0f}°C)")
+        reasons.append(f"추움(체감 {feels:.0f}°C)")
     elif feels >= 30:
         score -= 30
         reasons.append(f"너무 더움(체감 {feels:.0f}°C)")
@@ -152,28 +145,28 @@ def cached_elevation_profile(coords_latlon, ors_api_key: str):
 with st.sidebar:
     st.header("1) 지역 선택")
     preset = st.selectbox(
-        "프리셋 지역(중심점)",
+        "프리셋 지역",
         [
-            "서울 전체(대략)",
-            "남산/용산권",
-            "북한산권(은평/강북/도봉)",
-            "한강/여의도권",
-            "강남/양재권",
-            "사용자 지정(위경도)",
+            "서울 전체",
+            "용산구",
+            "은평,강북,도봉구",
+            "동작/영등포구",
+            "강남구",
+            "사용자 지정",
         ],
     )
 
-    if preset == "사용자 지정(위경도)":
+    if preset == "사용자 지정":
         lat = st.number_input("중심 위도(lat)", value=37.5665, format="%.6f")
         lon = st.number_input("중심 경도(lon)", value=126.9780, format="%.6f")
         radius_km = st.slider("반경(km)", 2.0, 30.0, 12.0, 0.5)
     else:
         presets = {
-            "서울 전체(대략)": (37.5665, 126.9780, 18.0),
-            "남산/용산권": (37.5512, 126.9882, 8.0),
-            "북한산권(은평/강북/도봉)": (37.6584, 126.9800, 12.0),
-            "한강/여의도권": (37.5250, 126.9250, 10.0),
-            "강남/양재권": (37.4840, 127.0350, 10.0),
+            "서울 전체": (37.5665, 126.9780, 18.0),
+            "용산구": (37.5512, 126.9882, 8.0),
+            "은평,강북,도봉구": (37.6584, 126.9800, 12.0),
+            "동작/영등포구": (37.5250, 126.9250, 10.0),
+            "강남구": (37.4840, 127.0350, 10.0),
         }
         lat, lon, radius_km = presets[preset]
 
@@ -183,12 +176,12 @@ with st.sidebar:
     max_relations = st.slider("후보 탐색량(Overpass 부담)", 20, 80, 50, 5)
 
     st.header("3) 트레킹 후 추천")
-    near_radius_m = st.slider("종료점 주변 추천 반경(m)", 100, 2000, 700, 50)
+    near_radius_m = st.slider("주변 추천 반경(m)", 100, 2000, 700, 50)
     sip_choice = st.radio(
         "추천 종류", ["전체", "카페(☕)", "맥주(🍺)"], horizontal=True
     )
 
-    st.header("4) 고도 그래프(ORS)")
+    st.header("4) 고도 그래프")
     show_elevation = st.checkbox("선택 코스 고도 그래프 보기", value=False)
 
     st.header("5) 오늘 날씨/야외 적합도")
@@ -196,12 +189,7 @@ with st.sidebar:
     use_end_weather = st.checkbox("선택 코스 종료점 기준으로 보기", value=True)
 
     st.divider()
-    st.caption(
-        "⚠️ Overpass는 공용 서버라 429(요청 제한)이 날 수 있어요. 잠시 후 재시도하면 대부분 해결됩니다."
-    )
-    st.caption(
-        "⚠️ ORS/OpenWeather도 요청 제한이 있을 수 있어요. 필요할 때만 켜는 걸 추천해요."
-    )
+
     if st.button("🔄 캐시 초기화", use_container_width=True):
         st.cache_data.clear()
         st.success("캐시 초기화 완료! 새로고침하면 다시 수집합니다.")
@@ -210,14 +198,14 @@ with st.sidebar:
 # ====== Load courses ======
 bbox = ob.bbox_from_center(lat, lon, radius_km)
 
-with st.status("OSM(Overpass)에서 트레킹 코스 후보 수집 중…", expanded=False) as status:
+with st.status("트레킹 코스 후보 수집 중…", expanded=False) as status:
     try:
         df = cached_courses(bbox, max_relations=max_relations)
         status.update(label=f"코스 후보 생성 완료 ({len(df)}개)", state="complete")
     except Exception as e:
         status.update(label="코스 후보 수집 실패", state="error")
         st.error(
-            "Overpass 서버가 요청 제한(429) 또는 일시 오류로 응답했습니다. 잠시 후 다시 시도해 주세요."
+            "서버가 요청 제한(429) 또는 일시 오류로 응답했습니다. 잠시 후 다시 시도해 주세요."
         )
         st.exception(e)
         st.stop()
@@ -226,14 +214,6 @@ if df.empty:
     st.error(
         "선택한 지역에서 코스 후보를 찾지 못했습니다. 반경을 늘리거나 다른 지역을 선택해 보세요."
     )
-    with st.expander("해결 팁", expanded=True):
-        st.write(
-            {
-                "1": "반경(km)을 18~30으로 늘려보세요.",
-                "2": "프리셋에서 '북한산권'을 먼저 테스트하면 성공 확률이 높아요.",
-                "3": "Overpass가 일시적으로 제한일 수 있어요(잠깐 뒤 재시도).",
-            }
-        )
     st.stop()
 
 # 난이도 필터
@@ -248,6 +228,56 @@ if df_use.empty:
 df_use = df_use.sort_values("score", ascending=False).head(topk).reset_index(drop=True)
 df_chart = df_use[["name", "difficulty", "distance_km", "members", "score"]].copy()
 
+# ====== (중요) 선택 코스를 지도/차트보다 먼저 고르게 해서,
+#       날씨를 "코스 후보 생성완료"와 "추천 코스 지도" 사이에 표시 가능하게 함 ======
+selected = st.selectbox("상세로 볼 코스 선택", df_use["name"].tolist(), index=0)
+row = df_use[df_use["name"] == selected].iloc[0].to_dict()
+
+# ====== Weather / Outdoor score (원하는 위치) ======
+if show_weather:
+    if not OPENWEATHER_API_KEY:
+        st.info("OPENWEATHER_API_KEY가 Secrets에 없어서 날씨를 표시할 수 없어요.")
+    else:
+        wlat, wlon = (
+            (float(row["end_lat"]), float(row["end_lon"]))
+            if use_end_weather
+            else (float(lat), float(lon))
+        )
+        try:
+            w = get_weather_openweather(wlat, wlon, OPENWEATHER_API_KEY)
+            judge = judge_outdoor(w)
+
+            # 제목처럼 보이게 한 줄 캡션
+            st.caption(
+                "🌦️ 오늘 날씨/야외 적합도 "
+                + ("(선택 코스 종료점 기준)" if use_end_weather else "(지역 중심 기준)")
+            )
+
+            if judge["level"] == "good":
+                st.success(
+                    f"🌤️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
+                )
+            elif judge["level"] == "warn":
+                st.warning(
+                    f"⛅ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
+                )
+            else:
+                st.error(
+                    f"🌧️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
+                )
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("기온(°C)", f"{judge['temp']:.1f}")
+            c2.metric("체감(°C)", f"{judge['feels']:.1f}")
+            c3.metric("바람(m/s)", f"{judge['wind_speed']:.1f}")
+            c4.metric("강수(mm/h)", f"{judge['precip_per_h']:.1f}")
+
+            st.progress(int(judge["score"]))
+        except Exception as e:
+            st.warning("날씨 API 호출에 실패했어요. 잠시 후 다시 시도해 주세요.")
+            st.exception(e)
+
+# ====== Map + Panel ======
 col_map, col_panel = st.columns([1.35, 1])
 
 with col_map:
@@ -255,9 +285,9 @@ with col_map:
     m = folium.Map(location=[lat, lon], zoom_start=12, tiles="OpenStreetMap")
 
     # bbox 표시
-    s, w, n, e = bbox
+    s, w_, n, e = bbox
     folium.Rectangle(
-        bounds=[[s, w], [n, e]], color="#0984e3", weight=2, fill=False
+        bounds=[[s, w_], [n, e]], color="#0984e3", weight=2, fill=False
     ).add_to(m)
 
     colors = [
@@ -271,15 +301,21 @@ with col_map:
         "#fdcb6e",
     ]
 
+    selected_name = row["name"]
+
     for i, r in df_use.iterrows():
         latlon = r["coords"]
         color = colors[i % len(colors)]
 
+        # 선택 코스는 더 두껍게 강조
+        weight = 8 if r["name"] == selected_name else 6
+        opacity = 0.95 if r["name"] == selected_name else 0.85
+
         folium.PolyLine(
             latlon,
             color=color,
-            weight=6,
-            opacity=0.85,
+            weight=weight,
+            opacity=opacity,
             tooltip=f"{i+1}위 {r['name']}",
         ).add_to(m)
 
@@ -309,76 +345,8 @@ with col_panel:
 
 st.divider()
 
-selected = st.selectbox("상세로 볼 코스 선택", df_use["name"].tolist(), index=0)
-row = df_use[df_use["name"] == selected].iloc[0].to_dict()
-
-# ====== Weather / Outdoor score ======
-if show_weather:
-    if not OPENWEATHER_API_KEY:
-        st.info("OPENWEATHER_API_KEY가 Secrets에 없어서 날씨를 표시할 수 없어요.")
-    else:
-        wlat, wlon = (
-            (float(row["end_lat"]), float(row["end_lon"]))
-            if use_end_weather
-            else (float(lat), float(lon))
-        )
-        try:
-            w = get_weather_openweather(wlat, wlon, OPENWEATHER_API_KEY)
-            judge = judge_outdoor(w)
-
-            if judge["level"] == "good":
-                st.success(
-                    f"🌤️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
-                )
-            elif judge["level"] == "warn":
-                st.warning(
-                    f"⛅ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
-                )
-            else:
-                st.error(
-                    f"🌧️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
-                )
-
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("기온(°C)", f"{judge['temp']:.1f}")
-            c2.metric("체감(°C)", f"{judge['feels']:.1f}")
-            c3.metric("바람(m/s)", f"{judge['wind_speed']:.1f}")
-            c4.metric("강수(mm/h)", f"{judge['precip_per_h']:.1f}")
-
-            st.progress(int(judge["score"]))
-
-            with st.expander("판정 근거 보기", expanded=False):
-                st.write(
-                    {
-                        "기온": judge["temp"],
-                        "체감": judge["feels"],
-                        "습도": judge["humidity"],
-                        "바람": judge["wind_speed"],
-                        "강수(mm/h)": judge["precip_per_h"],
-                        "설명": judge["desc"],
-                        "감점 요인": judge["reasons"],
-                    }
-                )
-
-        except Exception as e:
-            st.warning("날씨 API 호출에 실패했어요. 잠시 후 다시 시도해 주세요.")
-            st.exception(e)
-
-# ====== Course info ======
-st.subheader("🧭 선택 코스 정보")
-st.write(
-    {
-        "name": row["name"],
-        "difficulty": row["difficulty"],
-        "distance_km": row["distance_km"],
-        "route_members": int(row["members"]),
-        "start": (row["start_lat"], row["start_lon"]),
-        "end": (row["end_lat"], row["end_lon"]),
-    }
-)
-
 # ====== ORS Elevation ======
-st.subheader("⛰️ 고도(Altitude) 프로파일")
+st.subheader("⛰️ 고도 그래프")
 
 if show_elevation:
     ors_key = st.secrets.get("ORS_API_KEY", "")
