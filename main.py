@@ -184,8 +184,7 @@ with st.sidebar:
     st.header("4) 고도 그래프")
     show_elevation = st.checkbox("선택 코스 고도 그래프 보기", value=False)
 
-    st.header("5) 날씨 기준")
-    use_end_weather = st.checkbox("선택 코스 종료점 기준", value=True)
+    
 
 
     st.divider()
