@@ -184,9 +184,7 @@ with st.sidebar:
     st.header("4) 고도 그래프")
     show_elevation = st.checkbox("선택 코스 고도 그래프 보기", value=False)
 
-    st.header("5) 날씨 기준")
-    use_end_weather = st.checkbox("선택 코스 종료점 기준", value=True)
-
+   
 
 
     st.divider()
@@ -234,31 +232,31 @@ df_chart = df_use[["name", "difficulty", "distance_km", "members", "score"]].cop
 selected = st.selectbox("상세로 볼 코스 선택", df_use["name"].tolist(), index=0)
 row = df_use[df_use["name"] == selected].iloc[0].to_dict()
 
-# ====== Weather / Outdoor score (원하는 위치) ======
-# ====== Weather / Outdoor score (항상 메인에 표시) ======
-st.caption(
-    "🌦️ 오늘 날씨/야외 적합도 "
-    + ("(선택 코스 종료점 기준)" if use_end_weather else "(지역 중심 기준)")
-)
+# ====== Weather / Outdoor score (항상 메인에 표시, 시작점 기준) ======
+st.caption("🌦️ 오늘 날씨/야외 적합도 (선택 코스 시작점 기준)")
 
 if not OPENWEATHER_API_KEY:
     st.info("OPENWEATHER_API_KEY가 Secrets에 없어서 날씨를 표시할 수 없어요.")
 else:
-    wlat, wlon = (
-        (float(row["end_lat"]), float(row["end_lon"]))
-        if use_end_weather
-        else (float(lat), float(lon))
-    )
+    # ✅ 시작점 기준 고정
+    wlat, wlon = float(row["start_lat"]), float(row["start_lon"])
+
     try:
         w = get_weather_openweather(wlat, wlon, OPENWEATHER_API_KEY)
         judge = judge_outdoor(w)
 
         if judge["level"] == "good":
-            st.success(f"🌤️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}")
+            st.success(
+                f"🌤️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
+            )
         elif judge["level"] == "warn":
-            st.warning(f"⛅ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}")
+            st.warning(
+                f"⛅ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
+            )
         else:
-            st.error(f"🌧️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}")
+            st.error(
+                f"🌧️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
+            )
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("기온(°C)", f"{judge['temp']:.1f}")
@@ -267,9 +265,11 @@ else:
         c4.metric("강수(mm/h)", f"{judge['precip_per_h']:.1f}")
 
         st.progress(int(judge["score"]))
+
     except Exception as e:
         st.warning("날씨 API 호출에 실패했어요. 잠시 후 다시 시도해 주세요.")
         st.exception(e)
+
 
 # ====== Map + Panel ======
 col_map, col_panel = st.columns([1.35, 1])
