@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from typing import Any, Dict, List
 
 import altair as alt
@@ -13,9 +12,24 @@ import osm_backend as ob
 from kakaomap import kakao_keyword_search
 
 
-# ===============================
-# Page config
-# ===============================
+# ======================================================
+# 고정 설정값 (UI에서 제거된 값들)
+# ======================================================
+TOPK = 4
+MAX_RELATIONS = 50
+
+PUBLIC_DATA_FILES = 1500
+PUBLIC_MATCH_DIST = 250
+
+AFTER_TREK_RADIUS = 700
+
+KAKAO_RADIUS = 2000
+KAKAO_SIZE = 10
+
+
+# ======================================================
+# Page
+# ======================================================
 st.set_page_config(
     page_title="트레킹 코스 추천",
     page_icon="🥾",
@@ -24,9 +38,9 @@ st.set_page_config(
 st.title("🥾 트레킹 코스 추천")
 
 
-# ===============================
+# ======================================================
 # Weather
-# ===============================
+# ======================================================
 OPENWEATHER_API_KEY = st.secrets.get("OPENWEATHER_API_KEY", "")
 
 
@@ -65,10 +79,8 @@ def judge_outdoor(w: Dict[str, Any]) -> Dict[str, Any]:
     if wind_speed >= 8:
         score -= 15
 
-    score = max(0, min(100, score))
-
     return {
-        "score": score,
+        "score": max(0, min(100, score)),
         "desc": desc,
         "temp": temp,
         "feels": feels,
@@ -77,16 +89,16 @@ def judge_outdoor(w: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# ===============================
-# Elevation helpers
-# ===============================
+# ======================================================
+# Elevation
+# ======================================================
 def elev_color(elev: float) -> str:
     if elev < 120:
-        return "#2ecc71"  # green
+        return "#2ecc71"
     elif elev < 300:
-        return "#f1c40f"  # yellow
+        return "#f1c40f"
     else:
-        return "#e67e22"  # orange
+        return "#e67e22"
 
 
 @st.cache_data(ttl=3600)
@@ -94,79 +106,115 @@ def cached_elevation(coords, api_key: str):
     return ob.elevation_profile(coords, api_key=api_key)
 
 
-# ===============================
+# ======================================================
 # Sidebar
-# ===============================
+# ======================================================
 with st.sidebar:
     st.header("지역 선택")
     lat = st.number_input("위도", value=37.5665, format="%.6f")
     lon = st.number_input("경도", value=126.9780, format="%.6f")
     radius_km = st.slider("반경 (km)", 3.0, 25.0, 10.0)
-    topk = st.slider("추천 코스 수", 3, 10, 5)
 
     st.divider()
-    show_kakao = st.checkbox("카페 / 맥주 마커 표시", value=True)
-    kakao_radius = st.slider("카카오 검색 반경(m)", 300, 3000, 1000)
+    st.header("공공데이터 반영")
+    use_public = st.toggle("공공데이터 매칭 사용", value=True)
+
+    st.divider()
+    st.header("난이도")
+    diff_filter = st.multiselect(
+        "난이도 선택",
+        ["쉬움", "보통", "어려움"],
+        default=["쉬움", "보통", "어려움"],
+    )
+
+    st.divider()
+    st.header("추천 종류")
+    sip_choice = st.selectbox("추천 종류", ["전체", "카페", "맥주"])
+
+    st.divider()
+    show_kakao = st.toggle("카카오 카페/맥주 마커 표시", value=True)
 
 
-# ===============================
+# ======================================================
 # Load courses
-# ===============================
+# ======================================================
 bbox = ob.bbox_from_center(lat, lon, radius_km)
-df = pd.DataFrame(ob.build_courses(bbox, max_relations=40))
+df = pd.DataFrame(
+    ob.build_courses(
+        bbox,
+        max_relations=MAX_RELATIONS,
+        use_public_data=use_public,
+        public_files=PUBLIC_DATA_FILES,
+        public_match_dist=PUBLIC_MATCH_DIST,
+    )
+)
 
 if df.empty:
     st.error("추천 코스를 찾지 못했습니다.")
     st.stop()
 
-df = df.sort_values("score", ascending=False).head(topk).reset_index(drop=True)
+df = df[df["difficulty"].isin(diff_filter)]
+df = df.sort_values("score", ascending=False).head(TOPK).reset_index(drop=True)
 
-selected_name = st.selectbox("상세로 볼 코스 선택", df["name"])
+# ======================================================
+# 선택 코스 상태 (마커 클릭 연동)
+# ======================================================
+if "selected_course" not in st.session_state:
+    st.session_state["selected_course"] = df.iloc[0]["name"]
+
+selected_name = st.selectbox(
+    "상세로 볼 코스 선택",
+    df["name"],
+    index=df.index[df["name"] == st.session_state["selected_course"]][0],
+)
+
+st.session_state["selected_course"] = selected_name
 row = df[df["name"] == selected_name].iloc[0]
 
 
-# ===============================
-# Kakao places
-# ===============================
+# ======================================================
+# Kakao
+# ======================================================
 kakao_food, kakao_cafe = [], []
 kakao_key = st.secrets.get("KAKAO_REST_API_KEY", "")
 
 if show_kakao and kakao_key:
-    kakao_food = kakao_keyword_search(
-        query="맥주",
-        category="FD6",
-        x=row["end_lon"],
-        y=row["end_lat"],
-        radius=kakao_radius,
-        size=10,
-        api_key=kakao_key,
-    )
-    kakao_cafe = kakao_keyword_search(
-        query="카페",
-        category="CE7",
-        x=row["end_lon"],
-        y=row["end_lat"],
-        radius=kakao_radius,
-        size=10,
-        api_key=kakao_key,
-    )
+    if sip_choice in ("전체", "맥주"):
+        kakao_food = kakao_keyword_search(
+            query="맥주",
+            category="FD6",
+            x=row["end_lon"],
+            y=row["end_lat"],
+            radius=KAKAO_RADIUS,
+            size=KAKAO_SIZE,
+            api_key=kakao_key,
+        )
+    if sip_choice in ("전체", "카페"):
+        kakao_cafe = kakao_keyword_search(
+            query="카페",
+            category="CE7",
+            x=row["end_lon"],
+            y=row["end_lat"],
+            radius=KAKAO_RADIUS,
+            size=KAKAO_SIZE,
+            api_key=kakao_key,
+        )
 
 
-# ===============================
+# ======================================================
 # Layout
-# ===============================
+# ======================================================
 col_map, col_info = st.columns([1.4, 1])
 
 
-# ===============================
+# ======================================================
 # MAP
-# ===============================
+# ======================================================
 with col_map:
     m = folium.Map(location=[lat, lon], zoom_start=12)
 
     ors_key = st.secrets.get("ORS_API_KEY", "")
-    elev_profile: List[Dict[str, Any]] = []
-
+    elev_profile = []
     if ors_key:
         try:
             elev_profile = cached_elevation(row["coords"], ors_key)
@@ -177,7 +225,6 @@ with col_map:
         latlon = r["coords"]
         is_selected = r["name"] == selected_name
 
-        # ---- route ----
         if is_selected and elev_profile:
             elevs = [p["elev_m"] for p in elev_profile]
             n = min(len(latlon), len(elevs))
@@ -197,20 +244,18 @@ with col_map:
                 tooltip=f"{r['name']} · {r['distance_km']}km · {r['difficulty']}",
             ).add_to(m)
 
-        # ---- start / end markers ----
         folium.Marker(
             [r["start_lat"], r["start_lon"]],
-            icon=folium.Icon(color="blue", icon="play"),
             tooltip=f"[출발] {r['name']}",
+            icon=folium.Icon(color="blue", icon="play"),
         ).add_to(m)
 
         folium.Marker(
             [r["end_lat"], r["end_lon"]],
-            icon=folium.Icon(color="red", icon="flag"),
             tooltip=f"[도착] {r['name']}",
+            icon=folium.Icon(color="red", icon="flag"),
         ).add_to(m)
 
-    # Kakao markers
     for p in kakao_food:
         folium.Marker(
             [float(p["y"]), float(p["x"])],
@@ -225,12 +270,25 @@ with col_map:
             popup=f"<b>{p['place_name']}</b> · <a href='{p['place_url']}' target='_blank'>상세보기</a>",
         ).add_to(m)
 
-    st_folium(m, height=650, use_container_width=True)
+    map_out = st_folium(
+        m,
+        height=650,
+        use_container_width=True,
+        returned_objects=["last_object_clicked"],
+    )
+
+    if map_out and map_out.get("last_object_clicked"):
+        tooltip = map_out["last_object_clicked"].get("tooltip")
+        if tooltip:
+            name = tooltip.replace("[출발] ", "").replace("[도착] ", "")
+            if name in df["name"].values:
+                st.session_state["selected_course"] = name
+                st.experimental_rerun()
 
 
-# ===============================
+# ======================================================
 # RIGHT PANEL – Weather & Elevation
-# ===============================
+# ======================================================
 with col_info:
     st.subheader("날씨 / 야외 적합도")
 
@@ -271,11 +329,11 @@ with col_info:
         st.info("고도 정보가 없습니다.")
 
 
-# ===============================
+# ======================================================
 # Bottom – course list
-# ===============================
+# ======================================================
 st.divider()
-st.subheader("추천 코스 목록")
+st.subheader("추천 코스")
 
 st.dataframe(
     df[["name", "difficulty", "distance_km", "members", "score"]],
