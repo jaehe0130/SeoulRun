@@ -205,7 +205,7 @@ def _kakao_popup_compact(name: str, url: str) -> str:
 with st.sidebar:
     st.header("1) 지역 선택")
     preset = st.selectbox(
-        "프리셋",
+        "",
         ["서울 전체", "용산구", "도봉/노원", "동작/영등포", "강남구", "사용자 지정"],
     )
 
@@ -223,9 +223,9 @@ with st.sidebar:
         }
         lat, lon, radius_km = presets[preset]
 
-    st.header("2) 난이도(중복 선택)")
+    st.header("2) 난이도")
     diff_filter = st.multiselect(
-        "난이도(중복 선택 가능)",
+        "중복 선택 가능",
         ["쉬움", "보통", "어려움"],
         default=["쉬움", "보통", "어려움"],
     )
