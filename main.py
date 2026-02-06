@@ -118,6 +118,16 @@ def judge_outdoor(w: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def elev_color(elev: float) -> str:
+    # 간단 3단계 색상
+    if elev < 120:
+        return "#2ecc71"  # green
+    elif elev < 300:
+        return "#f1c40f"  # yellow
+    else:
+        return "#e67e22"  # orange
+
+
 # ====== Cached backend ======
 @st.cache_data(ttl=60 * 60)
 def cached_courses(
@@ -335,12 +345,40 @@ with col_map:
     # draw routes
     selected_name = row["name"]
     for i, r in df_use.iterrows():
-        latlon = r["coords"]
+        is_selected = r["name"] == selected_name
 
-        # 기본 색상(코스별) - 고도 색상은 오른쪽 그래프에서만, 지도는 가독성 우선
-        color = "#2ecc71" if r["name"] == selected_name else "#6c5ce7"
-        weight = 8 if r["name"] == selected_name else 5
-        opacity = 0.95 if r["name"] == selected_name else 0.75
+        # ✅ 선택 코스는 고도(ORS) 프로파일이 있으면 구간별 색칠
+        if is_selected and elev_available and isinstance(prof, list) and len(prof) >= 2:
+            pts = []
+            for p in prof:
+                try:
+                    pts.append((float(p["lat"]), float(p["lon"]), float(p["elev_m"])))
+                except Exception:
+                    pts = []
+                    break
+
+            if len(pts) >= 2:
+                for j in range(len(pts) - 1):
+                    lat1, lon1, e1 = pts[j]
+                    lat2, lon2, _ = pts[j + 1]
+                    folium.PolyLine(
+                        [(lat1, lon1), (lat2, lon2)],
+                        color=elev_color(e1),
+                        weight=8,
+                        opacity=0.95,
+                        tooltip=_tooltip_one_line(
+                            str(r["name"]),
+                            float(r["distance_km"]),
+                            str(r["difficulty"]),
+                        ),
+                    ).add_to(m)
+                continue  # 선택 코스는 이미 그렸으니 다음 코스로
+
+        # 나머지(또는 고도 데이터 없을 때)는 단색
+        latlon = r["coords"]
+        color = "#2ecc71" if is_selected else "#6c5ce7"
+        weight = 8 if is_selected else 5
+        opacity = 0.95 if is_selected else 0.75
 
         folium.PolyLine(
             latlon,
