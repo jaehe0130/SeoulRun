@@ -376,7 +376,11 @@ def relation_to_course(
     start = latlon[0]
     end = latlon[-1]
 
-    score_osm = round(math.log1p(len(members)) * 0.8 + math.log1p(dist_km) * 0.6, 3)
+    w_members = 0.8
+    w_distance = 0.6
+    score_members = math.log1p(len(members)) * w_members
+    score_distance = math.log1p(dist_km) * w_distance
+    score_osm = round(score_members + score_distance, 3)
 
     # ✅ 공공데이터 매칭 가산점
     m = match_official_by_endpoints(start, end, official_index or [])
@@ -389,8 +393,19 @@ def relation_to_course(
         "distance_km": dist_km,
         "difficulty": diff,
         "score": score_final,  # 최종 점수(신뢰도 포함)
-        "score_osm": score_osm,  # 참고용
+        "score_osm": score_osm,  # OSM 점수(거리/멤버 기반)
+        "score_members": round(score_members, 3),
+        "score_distance": round(score_distance, 3),
+        "score_weights": {"members": w_members, "distance": w_distance},
         "trust_score": trust_score,
+        "score_breakdown": {
+            "members_term": round(score_members, 3),
+            "distance_term": round(score_distance, 3),
+            "osm_score": score_osm,
+            "trust_score": trust_score,
+            "final_score": score_final,
+            "formula": "log1p(members)*0.8 + log1p(distance_km)*0.6 + trust_score",
+        },
         "official_matched": bool(m["matched"]),
         "official_nearest_m": m["nearest_m"],
         "official_name": m["official_name"],
