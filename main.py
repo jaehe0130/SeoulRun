@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List
 
 import altair as alt
 import folium
@@ -13,12 +13,16 @@ import osm_backend as ob
 from kakaomap import kakao_keyword_search
 
 
-def K(s: str) -> str:
-    return s.encode("utf-8").decode("unicode_escape")
+# ===============================
+# Page config
+# ===============================
+st.set_page_config(
+    page_title="트레킹 코스 추천",
+    page_icon="🥾",
+    layout="wide",
+)
+st.title("🥾 트레킹 코스 추천")
 
-
-st.set_page_config(page_title=K("트레킹 코스 추천"), page_icon="🥾", layout="wide")
-st.title(K("🥾 트레킹 코스 추천"))
 
 # ===============================
 # Weather
@@ -120,6 +124,7 @@ df = df.sort_values("score", ascending=False).head(topk).reset_index(drop=True)
 selected_name = st.selectbox("상세로 볼 코스 선택", df["name"])
 row = df[df["name"] == selected_name].iloc[0]
 
+
 # ===============================
 # Kakao places
 # ===============================
@@ -152,6 +157,7 @@ if show_kakao and kakao_key:
 # ===============================
 col_map, col_info = st.columns([1.4, 1])
 
+
 # ===============================
 # MAP
 # ===============================
@@ -171,7 +177,7 @@ with col_map:
         latlon = r["coords"]
         is_selected = r["name"] == selected_name
 
-        # ----- PolyLine -----
+        # ---- route ----
         if is_selected and elev_profile:
             elevs = [p["elev_m"] for p in elev_profile]
             n = min(len(latlon), len(elevs))
@@ -191,7 +197,7 @@ with col_map:
                 tooltip=f"{r['name']} · {r['distance_km']}km · {r['difficulty']}",
             ).add_to(m)
 
-        # ----- Start / End markers (with course name) -----
+        # ---- start / end markers ----
         folium.Marker(
             [r["start_lat"], r["start_lon"]],
             icon=folium.Icon(color="blue", icon="play"),
@@ -223,7 +229,7 @@ with col_map:
 
 
 # ===============================
-# RIGHT PANEL (Weather + Elevation)
+# RIGHT PANEL – Weather & Elevation
 # ===============================
 with col_info:
     st.subheader("날씨 / 야외 적합도")
@@ -231,15 +237,17 @@ with col_info:
     if OPENWEATHER_API_KEY:
         w = get_weather(row["start_lat"], row["start_lon"])
         j = judge_outdoor(w)
-        st.metric("적합도 점수", f"{j['score']} / 100")
-        st.write(j["desc"])
-        st.write(
-            {
-                "기온": f"{j['temp']}℃",
-                "체감": f"{j['feels']}℃",
-                "바람": f"{j['wind']} m/s",
-                "강수": f"{j['rain']} mm",
-            }
+
+        st.metric("야외 적합도 점수", f"{j['score']} / 100")
+        st.caption(j["desc"])
+
+        st.markdown(
+            f"""
+- **기온** : {j['temp']:.1f}℃
+- **체감 온도** : {j['feels']:.1f}℃
+- **바람** : {j['wind']:.1f} m/s
+- **강수량** : {j['rain']:.1f} mm
+"""
         )
     else:
         st.info("날씨 API 키가 없습니다.")
@@ -264,7 +272,7 @@ with col_info:
 
 
 # ===============================
-# Bottom – course table
+# Bottom – course list
 # ===============================
 st.divider()
 st.subheader("추천 코스 목록")
