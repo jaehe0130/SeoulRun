@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple, Optional
+import sys
 
 import altair as alt
 import folium
@@ -13,20 +14,20 @@ import osm_backend as ob
 from kakaomap import kakao_keyword_search
 
 
-# ===============================
-# Page config
-# ===============================
+def K(s: str) -> str:
+    return s.encode("utf-8").decode("unicode_escape")
+
+
 st.set_page_config(
-    page_title="트레킹 코스 추천",
+    page_title=K("트레킹 코스 추천"),
     page_icon="🥾",
     layout="wide",
 )
-st.title("🥾 트레킹 코스 추천")
+st.title(K("🥾 트레킹 코스 추천"))
 
-
-# ===============================
+# =========================
 # Weather
-# ===============================
+# =========================
 OPENWEATHER_API_KEY = st.secrets.get("OPENWEATHER_API_KEY", "")
 
 
@@ -55,8 +56,8 @@ def judge_outdoor(w: Dict[str, Any]) -> Dict[str, Any]:
     feels = float(main.get("feels_like", temp))
     wind_speed = float(wind.get("speed", 0))
     desc = weather.get("description", "")
-    precip = float(rain.get("1h", 0))
 
+    precip = float(rain.get("1h", 0))
     score = 100
     if precip >= 1:
         score -= 40
@@ -77,9 +78,9 @@ def judge_outdoor(w: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# ===============================
+# =========================
 # Elevation helpers
-# ===============================
+# =========================
 def elev_color(elev: float) -> str:
     if elev < 120:
         return "#2ecc71"  # green
@@ -94,14 +95,15 @@ def cached_elevation(coords, api_key: str):
     return ob.elevation_profile(coords, api_key=api_key)
 
 
-# ===============================
+# =========================
 # Sidebar
-# ===============================
+# =========================
 with st.sidebar:
-    st.header("지역 선택")
+    st.header(K("지역 선택"))
     lat = st.number_input("위도", value=37.5665, format="%.6f")
     lon = st.number_input("경도", value=126.9780, format="%.6f")
     radius_km = st.slider("반경 (km)", 3.0, 25.0, 10.0)
+
     topk = st.slider("추천 코스 수", 3, 10, 5)
 
     st.divider()
@@ -109,9 +111,9 @@ with st.sidebar:
     kakao_radius = st.slider("카카오 검색 반경(m)", 300, 3000, 1000)
 
 
-# ===============================
+# =========================
 # Load courses
-# ===============================
+# =========================
 bbox = ob.bbox_from_center(lat, lon, radius_km)
 df = pd.DataFrame(ob.build_courses(bbox, max_relations=40))
 
@@ -124,10 +126,9 @@ df = df.sort_values("score", ascending=False).head(topk).reset_index(drop=True)
 selected_name = st.selectbox("상세로 볼 코스 선택", df["name"])
 row = df[df["name"] == selected_name].iloc[0]
 
-
-# ===============================
+# =========================
 # Kakao places
-# ===============================
+# =========================
 kakao_food, kakao_cafe = [], []
 kakao_key = st.secrets.get("KAKAO_REST_API_KEY", "")
 
@@ -152,21 +153,19 @@ if show_kakao and kakao_key:
     )
 
 
-# ===============================
+# =========================
 # Layout
-# ===============================
+# =========================
 col_map, col_info = st.columns([1.4, 1])
 
-
-# ===============================
+# =========================
 # MAP
-# ===============================
+# =========================
 with col_map:
     m = folium.Map(location=[lat, lon], zoom_start=12)
 
     ors_key = st.secrets.get("ORS_API_KEY", "")
-    elev_profile: List[Dict[str, Any]] = []
-
+    elev_profile = []
     if ors_key:
         try:
             elev_profile = cached_elevation(row["coords"], ors_key)
@@ -177,13 +176,13 @@ with col_map:
         latlon = r["coords"]
         is_selected = r["name"] == selected_name
 
-        # ---- route ----
         if is_selected and elev_profile:
             elevs = [p["elev_m"] for p in elev_profile]
             n = min(len(latlon), len(elevs))
             for i in range(n - 1):
+                seg = [latlon[i], latlon[i + 1]]
                 folium.PolyLine(
-                    [latlon[i], latlon[i + 1]],
+                    seg,
                     color=elev_color(elevs[i]),
                     weight=8,
                     opacity=0.95,
@@ -197,17 +196,17 @@ with col_map:
                 tooltip=f"{r['name']} · {r['distance_km']}km · {r['difficulty']}",
             ).add_to(m)
 
-        # ---- start / end markers ----
+        # start / end markers
         folium.Marker(
             [r["start_lat"], r["start_lon"]],
             icon=folium.Icon(color="blue", icon="play"),
-            tooltip=f"[출발] {r['name']}",
+            tooltip="출발",
         ).add_to(m)
 
         folium.Marker(
             [r["end_lat"], r["end_lon"]],
             icon=folium.Icon(color="red", icon="flag"),
-            tooltip=f"[도착] {r['name']}",
+            tooltip="도착",
         ).add_to(m)
 
     # Kakao markers
@@ -228,26 +227,24 @@ with col_map:
     st_folium(m, height=650, use_container_width=True)
 
 
-# ===============================
-# RIGHT PANEL – Weather & Elevation
-# ===============================
+# =========================
+# RIGHT PANEL (Weather + Elevation)
+# =========================
 with col_info:
     st.subheader("날씨 / 야외 적합도")
 
     if OPENWEATHER_API_KEY:
         w = get_weather(row["start_lat"], row["start_lon"])
         j = judge_outdoor(w)
-
-        st.metric("야외 적합도 점수", f"{j['score']} / 100")
-        st.caption(j["desc"])
-
-        st.markdown(
-            f"""
-- **기온** : {j['temp']:.1f}℃
-- **체감 온도** : {j['feels']:.1f}℃
-- **바람** : {j['wind']:.1f} m/s
-- **강수량** : {j['rain']:.1f} mm
-"""
+        st.metric("적합도 점수", f"{j['score']} / 100")
+        st.write(f"{j['desc']}")
+        st.write(
+            {
+                "기온": f"{j['temp']}℃",
+                "체감": f"{j['feels']}℃",
+                "바람": f"{j['wind']} m/s",
+                "강수": f"{j['rain']} mm",
+            }
         )
     else:
         st.info("날씨 API 키가 없습니다.")
@@ -271,9 +268,9 @@ with col_info:
         st.info("고도 정보가 없습니다.")
 
 
-# ===============================
-# Bottom – course list
-# ===============================
+# =========================
+# Bottom – course table
+# =========================
 st.divider()
 st.subheader("추천 코스 목록")
 
