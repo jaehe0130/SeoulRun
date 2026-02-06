@@ -511,7 +511,7 @@ with col_side:
         st.markdown(
             """
         <div style="display:flex; justify-content:space-between; width:100%;
-                font-size:0.9rem; font-weight:600; color:#111827;">
+                font-size:0.9rem; font-weight:700; color: var(--text-color);">
         <span>⬅️ 시작점</span>
         <span>도착점 ➡️</span>
         </div>
