@@ -13,7 +13,7 @@ import osm_backend as ob
 from kakaomap import kakao_keyword_search
 
 
-st.set_page_config(page_title="트레킹 코스 추천", page_icon="🥾", layout="wide")
+st.set_page_config(page_title="SeoulTREK", page_icon="🥾", layout="wide")
 st.title("SeoulTREK🥾")
 
 
