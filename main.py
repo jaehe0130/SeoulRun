@@ -346,7 +346,7 @@ if show_elevation and ors_key:
 col_map, col_side = st.columns([1.35, 1], gap="large")
 
 with col_map:
-    st.subheader("추천 코스 + 카페/맥주 (OpenStreetMap)")
+    st.subheader("추천 코스")
 
     # ✅ 초기 location은 선택 코스 시작점으로
     map_center = [float(row["start_lat"]), float(row["start_lon"])]
@@ -533,8 +533,8 @@ with col_side:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("최저(m)", f"{float(df_ele['elev_m'].min()):.0f}")
         m2.metric("최고(m)", f"{float(df_ele['elev_m'].max()):.0f}")
-        m3.metric("총 상승(m)", f"{ascent:.0f}")
-        m4.metric("총 하강(m)", f"{descent:.0f}")
+        m3.metric("올라간 거리(m)", f"{ascent:.0f}")
+        m4.metric("내려간 거리(m)", f"{descent:.0f}")
 
 
 st.divider()
@@ -543,14 +543,13 @@ st.divider()
 st.subheader("추천코스 정보 / 점수(가중치)")
 
 show_cols = [
-    "name",
-    "difficulty",
-    "distance_km",
-    "members",
-    "score",
-    "score_osm",
-    "trust_score",
-    "official_matched",
+    "코스명",
+    "난이도",
+    "거리",
+    "점수",
+    "osm점수",
+    "신뢰도 점수",
+    "공공데이터 매칭 유무",
 ]
 exist_cols = [c for c in show_cols if c in df_use.columns]
 st.dataframe(df_use[exist_cols], use_container_width=True, hide_index=True)
