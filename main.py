@@ -14,7 +14,7 @@ from kakaomap import kakao_keyword_search
 
 
 st.set_page_config(page_title="트레킹 코스 추천", page_icon="🥾", layout="wide")
-st.title("🥾 트레킹 코스 추천")
+st.title("SeoulTREK🥾")
 
 
 # ====== Weather(OpenWeather) ======
