@@ -16,6 +16,7 @@ from kakaomap import kakao_keyword_search
 st.set_page_config(page_title="트레킹 코스 추천", page_icon="🥾", layout="wide")
 st.title("🥾 트레킹 코스 추천")
 
+
 # ====== Weather(OpenWeather) ======
 OPENWEATHER_API_KEY = st.secrets.get("OPENWEATHER_API_KEY", "")
 
@@ -23,7 +24,13 @@ OPENWEATHER_API_KEY = st.secrets.get("OPENWEATHER_API_KEY", "")
 @st.cache_data(ttl=600)
 def get_weather_openweather(lat: float, lon: float, api_key: str) -> Dict[str, Any]:
     url = "https://api.openweathermap.org/data/2.5/weather"
-    params = {"lat": lat, "lon": lon, "appid": api_key, "units": "metric", "lang": "kr"}
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "appid": api_key,
+        "units": "metric",
+        "lang": "kr",
+    }
     r = requests.get(url, params=params, timeout=10)
     r.raise_for_status()
     return r.json()
@@ -105,7 +112,6 @@ def judge_outdoor(w: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# ====== Elevation color ======
 def elev_color(elev: float) -> str:
     if elev < 120:
         return "#2ecc71"  # green
@@ -117,22 +123,22 @@ def elev_color(elev: float) -> str:
 
 # ====== Cached backend ======
 @st.cache_data(ttl=60 * 60)
-def cached_courses(
+def cached_official_index(
     bbox: Tuple[float, float, float, float],
-    max_relations: int,
-    use_public_data: bool,
-) -> pd.DataFrame:
-    official_index = None
-    if use_public_data:
-        # data 폴더의 GPX 최대 1500개 로딩(백엔드 설정 그대로)
-        official_index = ob.load_official_gpx_index("data", bbox=bbox, max_files=1500)
+) -> List[Dict[str, Any]]:
+    return ob.load_official_gpx_index("data", bbox=bbox, max_files=1500)
 
+
+@st.cache_data(ttl=60 * 60)
+def cached_courses(
+    bbox: Tuple[float, float, float, float], max_relations: int, use_public: bool
+) -> pd.DataFrame:
+    official_index = cached_official_index(bbox) if use_public else None
     courses = ob.build_courses(
         bbox, max_relations=max_relations, official_index=official_index
     )
     if not courses:
         return pd.DataFrame()
-
     df = pd.DataFrame(courses)
     df = df.sort_values(["score", "distance_km"], ascending=False).reset_index(
         drop=True
@@ -142,7 +148,6 @@ def cached_courses(
 
 @st.cache_data(ttl=60 * 20)
 def cached_elevation_profile(coords_latlon, ors_api_key: str):
-    # ✅ osm_backend.elevation_profile가 lat/lon까지 반환하도록 수정됨
     return ob.elevation_profile(coords_latlon, api_key=ors_api_key)
 
 
@@ -211,11 +216,12 @@ with st.sidebar:
 
     st.header("2) 난이도")
     diff_filter = st.radio("난이도", ["전체", "쉬움", "보통", "어려움"], index=0)
+
     topk = st.slider("추천 코스 개수", 3, 10, 4)
     max_relations = st.slider("Overpass 최대 관계 수", 20, 80, 50, 5)
 
     st.header("3) 공공데이터 반영")
-    use_public_data = st.checkbox("공공데이터(official) 매칭 반영", value=True)
+    use_public = st.checkbox("공공데이터 매칭 반영", value=True)
 
     st.header("4) 카카오 카페/맥주 마커")
     show_kakao = st.checkbox("카카오 마커 표시", value=True)
@@ -236,9 +242,7 @@ bbox = ob.bbox_from_center(lat, lon, radius_km)
 
 with st.status("코스 불러오는 중...", expanded=False) as status:
     try:
-        df = cached_courses(
-            bbox, max_relations=max_relations, use_public_data=use_public_data
-        )
+        df = cached_courses(bbox, max_relations=max_relations, use_public=use_public)
         status.update(label=f"코스 로딩 완료 ({len(df)})", state="complete")
     except Exception as e:
         status.update(label="코스 로딩 실패", state="error")
@@ -260,10 +264,8 @@ if df_use.empty:
     st.info("선택한 난이도의 코스가 없습니다. 다른 난이도를 선택하세요.")
     st.stop()
 
-# Top-k
 df_use = df_use.sort_values("score", ascending=False).head(topk).reset_index(drop=True)
 
-# course select
 selected = st.selectbox("상세로 볼 코스 선택", df_use["name"].tolist(), index=0)
 row = df_use[df_use["name"] == selected].iloc[0].to_dict()
 
@@ -308,7 +310,7 @@ if show_kakao:
         )
         st.sidebar.exception(e)
 
-# ====== Elevation (for panel + map coloring) ======
+# ====== Elevation (for panel + selected route coloring) ======
 ors_key = st.secrets.get("ORS_API_KEY", "")
 prof: List[Dict[str, Any]] = []
 elev_available = False
@@ -316,12 +318,12 @@ elev_available = False
 if show_elevation and ors_key:
     try:
         prof = cached_elevation_profile(row["coords"], ors_key) or []
-        elev_available = len(prof) >= 2
+        elev_available = len(prof) >= 2 and ("lat" in prof[0] and "lon" in prof[0])
     except Exception:
         prof = []
         elev_available = False
 
-# ====== Layout: Map (left) + Weather/Elevation (right) ======
+# ====== Layout ======
 col_map, col_side = st.columns([1.35, 1], gap="large")
 
 with col_map:
@@ -336,36 +338,18 @@ with col_map:
 
     selected_name = row["name"]
 
-    for i, r in df_use.iterrows():
+    for _, r in df_use.iterrows():
         is_selected = r["name"] == selected_name
 
-        # ✅ 선택 코스는 고도 색칠 (가능할 때만)
+        # ✅ 선택 코스만 고도 색칠(가능할 때만)
         if is_selected and elev_available:
-            pts = [
-                (float(p["lat"]), float(p["lon"]), float(p["elev_m"]))
-                for p in prof
-                if "lat" in p and "lon" in p
-            ]
-            if len(pts) >= 2:
-                for j in range(len(pts) - 1):
-                    lat1, lon1, e1 = pts[j]
-                    lat2, lon2, _ = pts[j + 1]
-                    folium.PolyLine(
-                        [(lat1, lon1), (lat2, lon2)],
-                        color=elev_color(e1),
-                        weight=8,
-                        opacity=0.95,
-                        tooltip=_tooltip_one_line(
-                            str(r["name"]),
-                            float(r["distance_km"]),
-                            str(r["difficulty"]),
-                        ),
-                    ).add_to(m)
-            else:
-                # fallback
+            pts = [(float(p["lat"]), float(p["lon"]), float(p["elev_m"])) for p in prof]
+            for i in range(len(pts) - 1):
+                lat1, lon1, e1 = pts[i]
+                lat2, lon2, _ = pts[i + 1]
                 folium.PolyLine(
-                    r["coords"],
-                    color="#2ecc71",
+                    [(lat1, lon1), (lat2, lon2)],
+                    color=elev_color(e1),
                     weight=8,
                     opacity=0.95,
                     tooltip=_tooltip_one_line(
@@ -373,7 +357,7 @@ with col_map:
                     ),
                 ).add_to(m)
         else:
-            # 나머지 코스는 단색
+            # 나머지는 단색
             color = "#2ecc71" if is_selected else "#6c5ce7"
             weight = 8 if is_selected else 5
             opacity = 0.95 if is_selected else 0.75
@@ -387,7 +371,7 @@ with col_map:
                 ),
             ).add_to(m)
 
-    # start/end marker (selected) — 코스명 포함
+    # 선택 코스 출발/도착(코스명 포함)
     folium.Marker(
         location=[float(row["start_lat"]), float(row["start_lon"])],
         tooltip=f"출발: {selected_name}",
@@ -410,6 +394,7 @@ with col_map:
             tooltip="카카오 검색 기준점",
         ).add_to(m)
 
+    # 맥주: 보라 / 카페: 분홍
     for p in kakao_beer:
         try:
             lat_p = float(p.get("y", 0))
@@ -491,7 +476,7 @@ with col_side:
 
 st.divider()
 
-st.subheader("추천코스 정보 / 점수(가중치)")
+st.subheader("추천코스 정보")
 show_cols = [
     "name",
     "difficulty",
