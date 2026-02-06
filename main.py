@@ -98,12 +98,6 @@ def cached_elevation(coords, api_key: str):
 # Sidebar
 # ===============================
 with st.sidebar:
-    # ✅ 세션 리셋 버튼 (추가된 부분)
-    if st.button("🔄 세션 / 캐시 초기화"):
-        st.session_state.clear()
-        st.cache_data.clear()
-        st.rerun()
-
     st.header("지역 선택")
     lat = st.number_input("위도", value=37.5665, format="%.6f")
     lon = st.number_input("경도", value=126.9780, format="%.6f")
