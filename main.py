@@ -245,11 +245,8 @@ if df.empty:
     st.stop()
 
 
-# difficulty filter
-if diff_filter != "전체":
-    df_use = df[df["difficulty"] == diff_filter].copy()
-else:
-    df_use = df.copy()
+# difficulty filter (중복 선택 가능)
+df_use = df[df["difficulty"].isin(diff_filter)].copy() if diff_filter else df.copy()
 
 if df_use.empty:
     st.info(
