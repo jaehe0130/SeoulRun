@@ -542,15 +542,15 @@ st.divider()
 # ====== 아래(전체 폭): 추천코스 정보 / 점수(가중치) ======
 st.subheader("추천코스 정보 / 점수(가중치)")
 
-show_cols = {
-    "name": "코스명",
-    "difficulty": "난이도",
-    "distance_km": "거리",
-    "score": "점수",
-    "score_osm": "osm점수",
-    "trust_score": "신뢰도 점수",
-    "official_matched": "공공데이터 매칭 유무",
-}
+show_cols = [
+    "name",
+    "difficulty",
+    "distance_km",
+    "score",
+    "score_osm",
+    "trust_score",
+    "official_matched",
+]
 
 exist_cols = [c for c in show_cols if c in df_use.columns]
 st.dataframe(df_use[exist_cols], use_container_width=True, hide_index=True)
