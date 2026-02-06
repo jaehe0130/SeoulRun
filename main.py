@@ -203,7 +203,11 @@ with st.sidebar:
         lat, lon, radius_km = presets[preset]
 
     st.header("2) 난이도")
-    diff_filter = st.radio("난이도", ["전체", "쉬움", "보통", "어려움"], index=0)
+    diff_filter = st.multiselect(
+        "난이도(중복 선택 가능)",
+        ["쉬움", "보통", "어려움"],
+        default=["쉬움", "보통", "어려움"],
+    )
     topk = st.slider("추천 코스 개수", 3, 10, 4)
     max_relations = st.slider("Overpass 최대 관계 수", 20, 80, 50, 5)
 
@@ -248,7 +252,9 @@ else:
     df_use = df.copy()
 
 if df_use.empty:
-    st.info("선택한 난이도의 코스가 없습니다. 다른 난이도를 선택하세요.")
+    st.info(
+        "선택한 난이도의 코스가 없습니다. 난이도 선택을 바꾸거나 반경을 늘려보세요."
+    )
     st.stop()
 
 # Top-k
@@ -490,51 +496,3 @@ show_cols = [
 ]
 exist_cols = [c for c in show_cols if c in df_use.columns]
 st.dataframe(df_use[exist_cols], use_container_width=True, hide_index=True)
-
-# 점수(가중치) - 선택 코스만, 화면 가로를 채우도록 metric으로 배치
-bd = row.get("score_breakdown") or {}
-members_term = bd.get("members_term")
-distance_term = bd.get("distance_term")
-trust_score = bd.get("trust_score")
-score_osm = bd.get("score_osm", row.get("score_osm"))
-score_final = bd.get("score_final", row.get("score"))
-
-st.markdown("#### 선택 코스 점수 구성")
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("멤버수", f"{int(row.get('members', 0))}")
-c2.metric(
-    "멤버 항", f"{members_term:.3f}" if isinstance(members_term, (int, float)) else "—"
-)
-c3.metric(
-    "거리 항",
-    f"{distance_term:.3f}" if isinstance(distance_term, (int, float)) else "—",
-)
-c4.metric(
-    "신뢰도 가산",
-    (
-        f"{float(trust_score):.3f}"
-        if isinstance(trust_score, (int, float))
-        else f"{float(row.get('trust_score', 0)):.3f}"
-    ),
-)
-c5.metric(
-    "최종 점수",
-    (
-        f"{float(score_final):.3f}"
-        if isinstance(score_final, (int, float))
-        else f"{float(row.get('score', 0)):.3f}"
-    ),
-)
-
-# 거리/점수 차트 (전체 폭)
-df_chart = df_use[["name", "difficulty", "distance_km", "members", "score"]].copy()
-chart = (
-    alt.Chart(df_chart)
-    .mark_bar()
-    .encode(
-        x=alt.X("name:N", title="코스"),
-        y=alt.Y("distance_km:Q", title="거리(km)"),
-        tooltip=["name", "difficulty", "distance_km", "members", "score"],
-    )
-)
-st.altair_chart(chart, use_container_width=True)

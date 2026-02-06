@@ -556,18 +556,40 @@ def ors_elevation_line(
 def elevation_profile(
     latlon: List[Tuple[float, float]], api_key: str
 ) -> List[Dict[str, float]]:
+    """
+    고도 프로파일(ORS elevation/line)
+    입력: [(lat, lon), ...]
+    출력: [{"dist_km":.., "elev_m":.., "lat":.., "lon":..}, ...]
+    - 지도에서 고도에 따라 색을 칠하려면 lat/lon이 필요해서 함께 반환합니다.
+    """
     coords3d = ors_elevation_line(latlon, api_key=api_key)
     if len(coords3d) < 2:
         return []
 
     prof: List[Dict[str, float]] = []
     dist_km = 0.0
-    prof.append({"dist_km": 0.0, "elev_m": float(coords3d[0][2])})
+
+    # 첫 점
+    prof.append(
+        {
+            "dist_km": 0.0,
+            "elev_m": float(coords3d[0][2]),
+            "lat": float(coords3d[0][0]),
+            "lon": float(coords3d[0][1]),
+        }
+    )
 
     for i in range(1, len(coords3d)):
         prev = coords3d[i - 1]
         cur = coords3d[i]
         dist_km += haversine_m(prev[0], prev[1], cur[0], cur[1]) / 1000.0
-        prof.append({"dist_km": round(dist_km, 4), "elev_m": float(cur[2])})
+        prof.append(
+            {
+                "dist_km": round(dist_km, 4),
+                "elev_m": float(cur[2]),
+                "lat": float(cur[0]),
+                "lon": float(cur[1]),
+            }
+        )
 
     return prof
