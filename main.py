@@ -11,6 +11,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 import osm_backend as ob
+from kakaomap import kakao_keyword_search
 
 st.set_page_config(page_title="트레킹 코스 추천", page_icon="🥾", layout="wide")
 st.title("🥾 트레킹 코스 추천")
@@ -159,6 +160,27 @@ def cached_elevation_profile(coords_latlon, ors_api_key: str):
     return ob.elevation_profile(coords_latlon, api_key=ors_api_key)
 
 
+@st.cache_data(ttl=60 * 10)
+def cached_kakao_places(
+    query: str,
+    category: str,
+    x: float,
+    y: float,
+    radius_m: int,
+    size: int,
+    api_key: str,
+) -> List[Dict[str, Any]]:
+    return kakao_keyword_search(
+        query=query,
+        category=category,
+        x=x,
+        y=y,
+        radius=radius_m,
+        size=size,
+        api_key=api_key,
+    )
+
+
 # ====== Sidebar ======
 with st.sidebar:
     st.header("1) 지역 선택")
@@ -209,6 +231,11 @@ with st.sidebar:
     st.header("4) 고도 그래프")
     show_elevation = st.checkbox("선택 코스 고도 그래프 보기", value=False)
 
+    st.header("5) 카카오 카페/맥주 마커")
+    show_kakao = st.checkbox("카카오 마커 표시", value=True)
+    kakao_radius_m = st.slider("카카오 검색 반경(m)", 200, 5000, 1200, 100)
+    kakao_size = st.slider("카카오 결과 수(각 카테고리)", 5, 15, 10, 1)
+
     st.divider()
 
     if st.button("🔄 캐시 초기화", use_container_width=True):
@@ -219,85 +246,122 @@ with st.sidebar:
 # ====== Load courses ======
 bbox = ob.bbox_from_center(lat, lon, radius_km)
 
-# 공공데이터 인덱스 로드(지역 bbox로 빠르게 필터링)
+# 공공데이터 인덱스 로드 (옵션)
 official_index: List[Dict[str, Any]] = []
-official_key = "official_off"
-
+official_key = "OFFICIAL_OFF"
 if official_on:
-    if not DATA_DIR.exists():
-        st.warning("data 폴더를 찾지 못했어요. project/data/ 에 GPX를 넣어주세요.")
-    else:
-        official_index = cached_official_index(str(DATA_DIR), bbox, int(max_gpx_files))
+    try:
+        official_index = cached_official_index(
+            str(DATA_DIR), bbox=bbox, max_files=max_gpx_files
+        )
         # 매칭 임계값은 backend에서 참조하도록 global setter로 전달
         ob.set_official_match_threshold(int(match_threshold_m))
-        official_key = f"official_on_{DATA_DIR.stat().st_mtime}_{len(official_index)}_{match_threshold_m}"
+        official_key = f"OFFICIAL_ON_{DATA_DIR.stat().st_mtime}_{len(official_index)}_{match_threshold_m}"
+    except Exception as e:
+        st.warning("공공데이터(GPX) 인덱스 로드 실패(폴더/형식/권한 확인).")
+        st.exception(e)
+        official_index = []
+        official_key = "OFFICIAL_OFF"
 
-with st.status("트레킹 코스 후보 수집 중…", expanded=False) as status:
+with st.status("코스 불러오는 중...", expanded=False) as status:
     try:
         df = cached_courses(
             bbox,
             max_relations=max_relations,
             official_key=official_key,
-            official_index=official_index if official_on else [],
+            official_index=official_index,
         )
-        status.update(label=f"코스 후보 생성 완료 ({len(df)}개)", state="complete")
+        status.update(label=f"코스 로딩 완료 ({len(df)})", state="complete")
     except Exception as e:
-        status.update(label="코스 후보 수집 실패", state="error")
-        st.error(
-            "서버가 요청 제한(429) 또는 일시 오류로 응답했습니다. 잠시 후 다시 시도해 주세요."
-        )
+        status.update(label="코스 로딩 실패", state="error")
+        st.error("서버 제한(429) 또는 일시적 오류입니다. 잠시 후 다시 시도하세요.")
         st.exception(e)
         st.stop()
 
 if df.empty:
     st.error(
-        "선택한 지역에서 코스 후보를 찾지 못했습니다. 반경을 늘리거나 다른 지역을 선택해 보세요."
+        "이 지역에서 코스를 찾지 못했습니다. 반경을 늘리거나 다른 지역을 선택하세요."
     )
     st.stop()
 
-# 난이도 필터
-df_use = df.copy()
+# ====== Select a course first (weather shows earlier) ======
+selected = st.selectbox("상세로 볼 코스 선택", df["name"].tolist(), index=0)
+row = df[df["name"] == selected].iloc[0].to_dict()
+
+# difficulty filter
 if diff_filter != "전체":
-    df_use = df_use[df_use["difficulty"] == diff_filter].copy()
+    df_use = df[df["difficulty"] == diff_filter].copy()
+else:
+    df_use = df.copy()
 
 if df_use.empty:
-    st.info("선택한 난이도에서 후보가 없습니다. 다른 난이도를 선택해 보세요.")
+    st.info("선택한 난이도의 코스가 없습니다. 다른 난이도를 선택하세요.")
     st.stop()
 
+# top-k
 df_use = df_use.sort_values("score", ascending=False).head(topk).reset_index(drop=True)
-
-# 차트용(최종 score 기준)
 df_chart = df_use[
     ["name", "difficulty", "distance_km", "members", "trust_score", "score"]
 ].copy()
 
-# ====== 선택 코스 ======
-selected = st.selectbox("상세로 볼 코스 선택", df_use["name"].tolist(), index=0)
-row = df_use[df_use["name"] == selected].iloc[0].to_dict()
+# ====== Kakao places (near selected course end) ======
+kakao_cafe: List[Dict[str, Any]] = []
+kakao_beer: List[Dict[str, Any]] = []
+kakao_center: Tuple[float, float] | None = None
+
+if show_kakao:
+    try:
+        kakao_key = st.secrets.get("KAKAO_REST_API_KEY", "") or st.secrets.get(
+            "KAKAO_REST_KEY", ""
+        )
+        if not kakao_key:
+            st.info("KAKAO_REST_API_KEY가 Secrets에 없어 카카오 마커를 숨깁니다.")
+        else:
+            end_lon = float(row["end_lon"])
+            end_lat = float(row["end_lat"])
+            kakao_center = (end_lat, end_lon)
+
+            kakao_cafe = cached_kakao_places(
+                query="카페",
+                category="CE7",
+                x=end_lon,
+                y=end_lat,
+                radius_m=int(kakao_radius_m),
+                size=int(kakao_size),
+                api_key=kakao_key,
+            )
+            kakao_beer = cached_kakao_places(
+                query="맥주",
+                category="FD6",  # 음식점/주점도 키워드로 많이 잡힘
+                x=end_lon,
+                y=end_lat,
+                radius_m=int(kakao_radius_m),
+                size=int(kakao_size),
+                api_key=kakao_key,
+            )
+    except Exception as e:
+        st.warning("Kakao Local 호출 실패. API 키/권한(IP 제한) 확인하세요.")
+        st.exception(e)
 
 # ====== Weather / Outdoor score ======
-st.caption("🌦️ 오늘 날씨/야외 적합도 (선택 코스 시작점 기준)")
+st.caption("날씨/야외 적합도 (선택 코스 시작점 기준)")
 
 if not OPENWEATHER_API_KEY:
-    st.info("OPENWEATHER_API_KEY가 Secrets에 없어서 날씨를 표시할 수 없어요.")
+    st.info("OPENWEATHER_API_KEY가 없어 날씨 패널을 숨깁니다.")
 else:
     wlat, wlon = float(row["start_lat"]), float(row["start_lon"])
+
     try:
         w = get_weather_openweather(wlat, wlon, OPENWEATHER_API_KEY)
         judge = judge_outdoor(w)
 
+        msg = f"{judge['label']}  (점수 {judge['score']}/100) · {judge['desc']}"
         if judge["level"] == "good":
-            st.success(
-                f"🌤️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
-            )
+            st.success(msg)
         elif judge["level"] == "warn":
-            st.warning(
-                f"⛅ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
-            )
+            st.warning(msg)
         else:
-            st.error(
-                f"🌧️ {judge['label']}  (점수 {judge['score']}/100) — {judge['desc']}"
-            )
+            st.error(msg)
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("기온(°C)", f"{judge['temp']:.1f}")
@@ -308,24 +372,14 @@ else:
         st.progress(int(judge["score"]))
 
     except Exception as e:
-        st.warning("날씨 API 호출에 실패했어요. 잠시 후 다시 시도해 주세요.")
+        st.warning("날씨 API 호출 실패. 나중에 다시 시도하세요.")
         st.exception(e)
-
-# ====== 공공데이터 매칭 상태 ======
-if official_on:
-    if row.get("official_matched"):
-        st.success(
-            f"✅ 공공데이터(GPX) 매칭됨: {row.get('official_name','-')} "
-            f"(≈{row.get('official_nearest_m','-')}m, +{row.get('trust_score',0)})"
-        )
-    else:
-        st.caption("공공데이터(GPX) 매칭 없음(=OSM 기반 후보)")
 
 # ====== Map + Panel ======
 col_map, col_panel = st.columns([1.35, 1])
 
 with col_map:
-    st.subheader("🗺️ 추천 코스 지도")
+    st.subheader("🗺️ 추천 코스 지도 + 카카오 카페/맥주")
     m = folium.Map(location=[lat, lon], zoom_start=12, tiles="OpenStreetMap")
 
     s, w_, n, e = bbox
@@ -367,6 +421,49 @@ with col_map:
             icon=folium.Icon(color="green", icon="flag"),
         ).add_to(m)
 
+    # Kakao markers
+    if kakao_center:
+        folium.CircleMarker(
+            location=[kakao_center[0], kakao_center[1]],
+            radius=6,
+            color="#2d3436",
+            fill=True,
+            fill_color="#2d3436",
+            tooltip="카카오 검색 기준점(코스 종료)",
+        ).add_to(m)
+
+    for p in kakao_cafe:
+        try:
+            lat_p = float(p.get("y", 0))
+            lon_p = float(p.get("x", 0))
+        except Exception:
+            continue
+        name = p.get("place_name", "")
+        addr = p.get("address_name", "")
+        url = p.get("place_url", "")
+        popup = f"<b>{name}</b><br>{addr}<br><a href='{url}' target='_blank'>상세</a>"
+        folium.Marker(
+            location=[lat_p, lon_p],
+            popup=popup,
+            icon=folium.Icon(color="blue", icon="coffee"),
+        ).add_to(m)
+
+    for p in kakao_beer:
+        try:
+            lat_p = float(p.get("y", 0))
+            lon_p = float(p.get("x", 0))
+        except Exception:
+            continue
+        name = p.get("place_name", "")
+        addr = p.get("address_name", "")
+        url = p.get("place_url", "")
+        popup = f"<b>{name}</b><br>{addr}<br><a href='{url}' target='_blank'>상세</a>"
+        folium.Marker(
+            location=[lat_p, lon_p],
+            popup=popup,
+            icon=folium.Icon(color="red", icon="glass"),
+        ).add_to(m)
+
     st_folium(m, height=620, width=None)
 
 with col_panel:
@@ -405,7 +502,7 @@ if show_elevation:
         try:
             prof = cached_elevation_profile(row["coords"], ors_key)
         except Exception as e:
-            st.error("ORS 고도 요청 중 오류가 발생했습니다. (키/쿼터/네트워크 확인)")
+            st.error("ORS 고도 요청 실패. 키/쿼터/네트워크를 확인하세요.")
             st.exception(e)
             prof = []
 
@@ -416,7 +513,7 @@ if show_elevation:
                 alt.Chart(df_ele)
                 .mark_line()
                 .encode(
-                    x=alt.X("dist_km:Q", title="누적 거리(km)"),
+                    x=alt.X("dist_km:Q", title="거리(km)"),
                     y=alt.Y("elev_m:Q", title="고도(m)"),
                     tooltip=["dist_km", "elev_m"],
                 )
@@ -437,33 +534,29 @@ if show_elevation:
                 {
                     "min_m": round(float(df_ele["elev_m"].min()), 1),
                     "max_m": round(float(df_ele["elev_m"].max()), 1),
-                    "total_ascent_m(추정)": round(ascent, 1),
-                    "total_descent_m(추정)": round(descent, 1),
+                    "total_ascent_m": round(ascent, 1),
+                    "total_descent_m": round(descent, 1),
                     "points": int(len(df_ele)),
                 }
             )
         else:
-            st.info(
-                "고도 데이터를 가져오지 못했어요. ORS 응답이 비어있거나 코스가 너무 짧을 수 있어요."
-            )
+            st.info("이 코스의 고도 데이터를 가져오지 못했습니다.")
 else:
     st.caption("사이드바에서 '선택 코스 고도 그래프 보기'를 체크하면 표시됩니다.")
 
-# ====== After trekking 추천 ======
-st.subheader("☕/🍺 트레킹 후 추천 TOP 10 (종료점 기준)")
+# ====== After trekking ======
+st.subheader("🍻 트레킹 후 주변 추천 Top 10")
 try:
     places = cached_places(
         float(row["end_lat"]), float(row["end_lon"]), int(near_radius_m)
     )
 except Exception as e:
-    st.error(
-        "주변 장소 조회 중 Overpass 제한/오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
-    )
+    st.error("주변 장소 조회 실패(Overpass 제한 또는 오류). 나중에 다시 시도하세요.")
     st.exception(e)
     st.stop()
 
 if sip_choice != "전체":
-    want = "coffee" if "카페" in sip_choice else "beer"
+    want = "coffee" if sip_choice.startswith("카페") else "beer"
     places = [p for p in places if p.get("category") == want]
 
 if not places:
