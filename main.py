@@ -15,7 +15,11 @@ from kakaomap import kakao_keyword_search
 
 st.set_page_config(page_title="SeoulTREK", page_icon="🥾", layout="wide")
 st.title("SeoulTREK🥾")
-st.markdown("서울의 트래킹 코스를 한눈에")
+st.markdown(
+    "<h3 style='color:blue;'>서울의 트래킹 코스를 한눈에</h3>",
+    unsafe_allow_html=True
+)
+st.divider()
 
 
 # ====== Weather(OpenWeather) ======
