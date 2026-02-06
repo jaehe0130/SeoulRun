@@ -30,211 +30,146 @@ ORS_MAX_VERTICES = 2000
 _OFFICIAL_MATCH_THRESHOLD_M = 250
 
 
-def set_official_match_threshold(threshold_m: int) -> None:
-    global _OFFICIAL_MATCH_THRESHOLD_M
-    _OFFICIAL_MATCH_THRESHOLD_M = max(10, int(threshold_m))
-
-
-# ===== 기본 유틸 =====
-def bbox_from_center(
-    lat: float, lon: float, radius_km: float
-) -> Tuple[float, float, float, float]:
-    """bbox: (south, west, north, east)"""
-    d = radius_km / 111.0
-    return (lat - d, lon - d, lat + d, lon + d)
+def _safe_get(d: Dict[str, Any], k: str, default: Any = None) -> Any:
+    v = d.get(k)
+    return default if v is None else v
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371000.0
-    p = math.pi / 180.0
-    dlat = (lat2 - lat1) * p
-    dlon = (lon2 - lon1) * p
-    a = (math.sin(dlat / 2) ** 2) + math.cos(lat1 * p) * math.cos(lat2 * p) * (
-        math.sin(dlon / 2) ** 2
-    )
-    return 2 * R * math.asin(math.sqrt(a))
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
 
 
 def polyline_length_km(latlon: List[Tuple[float, float]]) -> float:
     if len(latlon) < 2:
         return 0.0
-    dist = 0.0
+    s = 0.0
     for i in range(1, len(latlon)):
-        dist += haversine_m(
-            latlon[i - 1][0], latlon[i - 1][1], latlon[i][0], latlon[i][1]
-        )
-    return dist / 1000.0
+        s += haversine_m(latlon[i - 1][0], latlon[i - 1][1], latlon[i][0], latlon[i][1])
+    return s / 1000.0
 
 
-def _safe_get(d: Dict[str, Any], k: str, default: str = "") -> str:
-    v = d.get(k) if isinstance(d, dict) else None
-    return str(v).strip() if v is not None else default
+def bbox_from_center(
+    lat: float, lon: float, radius_km: float
+) -> Tuple[float, float, float, float]:
+    dlat = radius_km / 111.0
+    dlon = radius_km / (111.0 * max(0.2, math.cos(math.radians(lat))))
+    south = lat - dlat
+    north = lat + dlat
+    west = lon - dlon
+    east = lon + dlon
+    return (south, west, north, east)
 
 
-def _difficulty_from_sac(sac: str) -> str:
-    sac = (sac or "").strip()
-    if sac == "hiking":
-        return "쉬움"
-    if sac == "mountain_hiking":
-        return "보통"
-    if sac in {
-        "demanding_mountain_hiking",
-        "alpine_hiking",
-        "demanding_alpine_hiking",
-        "difficult_alpine_hiking",
-    }:
-        return "어려움"
-    return ""
+def overpass_post(query: str, timeout: int = 60) -> Dict[str, Any]:
+    last_err = None
+    for url in OVERPASS_URLS:
+        try:
+            r = requests.post(url, data={"data": query}, headers=UA, timeout=timeout)
+            if r.status_code == 429:
+                time.sleep(1.2)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last_err = e
+            time.sleep(0.5)
+            continue
+    raise RuntimeError(f"Overpass failed: {last_err}")
 
 
-def difficulty_label(sac_hint: str, distance_km: float) -> str:
-    d = _difficulty_from_sac(sac_hint)
-    if d:
-        return d
-    if distance_km < 5:
-        return "쉬움"
-    if distance_km < 10:
-        return "보통"
-    return "어려움"
-
-
-# ===== Overpass =====
-def overpass_post(
-    query: str, timeout: int = 60, max_retries: int = 3
-) -> Dict[str, Any]:
+def overpass_trails_query(
+    bbox: Tuple[float, float, float, float], max_relations: int = 50
+) -> str:
+    s, w, n, e = bbox
+    return f"""
+    [out:json][timeout:45];
+    (
+      relation["route"="hiking"]({s},{w},{n},{e});
+    );
+    out body {max_relations};
+    >;
+    out geom;
     """
-    429 대응:
-    - 429면 백오프 + Retry-After(있으면 반영)
-    - 서버 로테이션
-    """
-    last_err: Exception | None = None
-
-    for base in OVERPASS_URLS:
-        wait_s = 2.0
-        for _ in range(max_retries):
-            try:
-                r = requests.post(
-                    base, data=query.encode("utf-8"), headers=UA, timeout=timeout
-                )
-
-                if r.status_code == 429:
-                    ra = r.headers.get("Retry-After")
-                    if ra:
-                        try:
-                            wait_s = max(wait_s, float(ra))
-                        except Exception:
-                            pass
-                    time.sleep(wait_s)
-                    wait_s = min(wait_s * 2, 20.0)
-                    continue
-
-                r.raise_for_status()
-                return r.json()
-
-            except Exception as e:
-                last_err = e
-                time.sleep(min(wait_s, 10.0))
-                wait_s = min(wait_s * 1.6, 15.0)
-
-    if last_err:
-        raise last_err
-    raise RuntimeError("Overpass request failed")
 
 
 def fetch_trails_relations(
     bbox: Tuple[float, float, float, float], max_relations: int = 50
 ) -> List[Dict[str, Any]]:
-    s, w, n, e = bbox
-    q = f"""
-    [out:json][timeout:60];
-    (
-      relation["route"="hiking"]({s},{w},{n},{e});
-      relation["route"="foot"]({s},{w},{n},{e});
-    );
-    out body geom;
-    """
-    data = overpass_post(q, timeout=75)
-    elements = data.get("elements", [])
-    rels = [el for el in elements if el.get("type") == "relation"]
-
-    rels_named = [r for r in rels if (r.get("tags") or {}).get("name")]
-    rels = rels_named if rels_named else rels
-    return rels[:max_relations]
+    q = overpass_trails_query(bbox, max_relations=max_relations)
+    data = overpass_post(q, timeout=60)
+    els = data.get("elements") or []
+    rels = [el for el in els if el.get("type") == "relation"]
+    return rels
 
 
-# ===== 공공데이터(GPX) 인덱스 =====
-_GPX_NS = {"g": "http://www.topografix.com/GPX/1/1"}
+def difficulty_label(sac_scale: str, dist_km: float) -> str:
+    sac = (sac_scale or "").lower()
+    if "demanding" in sac or "alpine" in sac:
+        return "어려움"
+    if dist_km >= 16:
+        return "어려움"
+    if dist_km >= 8:
+        return "보통"
+    return "쉬움"
 
 
+# ===== 공공데이터(GPX) =====
 def _bbox_intersects(
-    b1: Tuple[float, float, float, float],
-    b2: Tuple[float, float, float, float],
+    a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]
 ) -> bool:
-    # (south, west, north, east)
-    s1, w1, n1, e1 = b1
-    s2, w2, n2, e2 = b2
-    return not (e1 < w2 or e2 < w1 or n1 < s2 or n2 < s1)
+    a_s, a_w, a_n, a_e = a
+    b_s, b_w, b_n, b_e = b
+    return not (a_e < b_w or a_w > b_e or a_n < b_s or a_s > b_n)
 
 
-def _parse_gpx_bounds_and_endpoints(gpx_path: Path) -> Optional[Dict[str, Any]]:
-    """
-    GPX에서 metadata/bounds + 트랙 시작/끝점만 빠르게 파싱
-    반환 dict:
-      name, start_lat, start_lon, end_lat, end_lon, bbox(s,w,n,e)
-    """
+def _parse_gpx_bounds_and_endpoints(path: Path) -> Optional[Dict[str, Any]]:
     try:
-        root = ET.parse(gpx_path).getroot()
+        root = ET.parse(path).getroot()
     except Exception:
         return None
 
-    meta = root.find("g:metadata", _GPX_NS)
-    b = meta.find("g:bounds", _GPX_NS) if meta is not None else None
-    if b is None or not b.attrib:
+    ns = ""
+    if "}" in root.tag:
+        ns = root.tag.split("}")[0] + "}"
+
+    trkpts = root.findall(f".//{ns}trkpt")
+    if len(trkpts) < 2:
         return None
 
-    try:
-        minlat = float(b.attrib.get("minlat"))
-        minlon = float(b.attrib.get("minlon"))
-        maxlat = float(b.attrib.get("maxlat"))
-        maxlon = float(b.attrib.get("maxlon"))
-    except Exception:
+    lats = []
+    lons = []
+    for pt in trkpts:
+        lat = pt.attrib.get("lat")
+        lon = pt.attrib.get("lon")
+        if lat is None or lon is None:
+            continue
+        lats.append(float(lat))
+        lons.append(float(lon))
+
+    if len(lats) < 2:
         return None
 
-    trk = root.find("g:trk", _GPX_NS)
-    if trk is None:
-        return None
-    seg = trk.find("g:trkseg", _GPX_NS)
-    if seg is None:
-        return None
-    pts = seg.findall("g:trkpt", _GPX_NS)
-    if len(pts) < 2:
-        return None
+    start_lat, start_lon = lats[0], lons[0]
+    end_lat, end_lon = lats[-1], lons[-1]
 
-    try:
-        s_lat = float(pts[0].attrib["lat"])
-        s_lon = float(pts[0].attrib["lon"])
-        e_lat = float(pts[-1].attrib["lat"])
-        e_lon = float(pts[-1].attrib["lon"])
-    except Exception:
-        return None
-
-    # 이름 우선순위: wpt name 1->last, 없으면 파일명
-    wpts = root.findall("g:wpt", _GPX_NS)
-    if wpts:
-        w1 = (wpts[0].findtext("g:name", default="", namespaces=_GPX_NS) or "").strip()
-        w2 = (wpts[-1].findtext("g:name", default="", namespaces=_GPX_NS) or "").strip()
-        name = f"{w1} → {w2}".strip(" →")
-    else:
-        name = gpx_path.stem
+    name = path.stem
+    b = (min(lats), min(lons), max(lats), max(lons))
 
     return {
         "name": name,
-        "start_lat": s_lat,
-        "start_lon": s_lon,
-        "end_lat": e_lat,
-        "end_lon": e_lon,
-        "bbox": (minlat, minlon, maxlat, maxlon),  # (s,w,n,e)
-        "path": str(gpx_path),
+        "start_lat": start_lat,
+        "start_lon": start_lon,
+        "end_lat": end_lat,
+        "end_lon": end_lon,
+        "bbox": b,
+        "path": str(path),
     }
 
 
@@ -243,11 +178,6 @@ def load_official_gpx_index(
     bbox: Optional[Tuple[float, float, float, float]] = None,
     max_files: int = 1500,
 ) -> List[Dict[str, Any]]:
-    """
-    data_dir 아래의 .gpx를 스캔해서 '공식 구간 인덱스' 생성
-    - bbox가 주어지면 GPX bounds 교차 여부로 1차 필터링(빠름)
-    - max_files까지 로드(속도/메모리 제어)
-    """
     base = Path(data_dir)
     if not base.exists():
         return []
@@ -264,9 +194,8 @@ def load_official_gpx_index(
         if not info:
             continue
 
-        if bbox is not None:
-            if not _bbox_intersects(bbox, info["bbox"]):
-                continue
+        if bbox is not None and not _bbox_intersects(bbox, info["bbox"]):
+            continue
 
         out.append(info)
         picked += 1
@@ -279,11 +208,6 @@ def match_official_by_endpoints(
     course_end: Tuple[float, float],
     official_index: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """
-    OSM 코스 start/end가 공식 GPX 구간 start/end와 가까우면 매칭
-    - 방향 반대 가능성 고려(정방향/역방향)
-    - trust_score: 0~30점 (가까울수록 높음)
-    """
     if not official_index:
         return {
             "matched": False,
@@ -318,23 +242,22 @@ def match_official_by_endpoints(
 
     th = float(_OFFICIAL_MATCH_THRESHOLD_M)
     if best_nearest <= th:
-        trust = 5.0 + (th - best_nearest) / th * 25.0  # 5~30
+        trust = max(0.0, 30.0 * (1.0 - (best_nearest / th)))
         return {
             "matched": True,
-            "trust_score": round(float(trust), 2),
-            "nearest_m": round(float(best_nearest), 1),
+            "trust_score": round(trust, 3),
+            "nearest_m": int(best_nearest),
             "official_name": best_name,
         }
 
     return {
         "matched": False,
         "trust_score": 0.0,
-        "nearest_m": round(float(best_nearest), 1),
+        "nearest_m": int(best_nearest),
         "official_name": best_name,
     }
 
 
-# ===== 코스 생성(공식 매칭 포함) =====
 def relation_to_course(
     rel: Dict[str, Any],
     official_index: Optional[List[Dict[str, Any]]] = None,
@@ -378,7 +301,6 @@ def relation_to_course(
 
     score_osm = round(math.log1p(len(members)) * 0.8 + math.log1p(dist_km) * 0.6, 3)
 
-    # ✅ 공공데이터 매칭 가산점
     m = match_official_by_endpoints(start, end, official_index or [])
     trust_score = float(m["trust_score"])
     score_final = round(score_osm + trust_score, 3)
@@ -388,8 +310,8 @@ def relation_to_course(
         "name": name,
         "distance_km": dist_km,
         "difficulty": diff,
-        "score": score_final,  # 최종 점수(신뢰도 포함)
-        "score_osm": score_osm,  # 참고용
+        "score": score_final,
+        "score_osm": score_osm,
         "trust_score": trust_score,
         "score_breakdown": {
             "members_term": round(math.log1p(len(members)) * 0.8, 3),
@@ -402,7 +324,7 @@ def relation_to_course(
         "official_matched": bool(m["matched"]),
         "official_nearest_m": m["nearest_m"],
         "official_name": m["official_name"],
-        "coords": latlon,  # [(lat, lon), ...]
+        "coords": latlon,
         "start_lat": start[0],
         "start_lon": start[1],
         "end_lat": end[0],
@@ -432,75 +354,6 @@ def build_courses(
     return list(dedup.values())
 
 
-# ===== 주변 장소(카페/펍) =====
-def overpass_places_query(lat: float, lon: float, radius_m: int) -> str:
-    return f"""
-    [out:json][timeout:45];
-    (
-      node(around:{radius_m},{lat},{lon})[amenity=cafe];
-      node(around:{radius_m},{lat},{lon})[amenity=bar];
-      node(around:{radius_m},{lat},{lon})[amenity=pub];
-    );
-    out body;
-    """
-
-
-def extract_place(
-    el: Dict[str, Any], origin_lat: float, origin_lon: float
-) -> Optional[Dict[str, Any]]:
-    if el.get("type") != "node":
-        return None
-    tags = el.get("tags") or {}
-    name = tags.get("name")
-    if not name:
-        return None
-
-    lat = el.get("lat")
-    lon = el.get("lon")
-    if lat is None or lon is None:
-        return None
-
-    amenity = tags.get("amenity", "")
-    category = "coffee" if amenity == "cafe" else "beer"
-    dist = int(haversine_m(origin_lat, origin_lon, float(lat), float(lon)))
-
-    quality = 0
-    if tags.get("opening_hours"):
-        quality += 2
-    if tags.get("website") or tags.get("contact:website"):
-        quality += 2
-    if tags.get("addr:street") or tags.get("addr:full"):
-        quality += 1
-    quality = min(5, quality)
-
-    return {
-        "name": str(name),
-        "category": category,
-        "lat": float(lat),
-        "lon": float(lon),
-        "distance_m": dist,
-        "quality_score": quality,
-        "opening_hours": tags.get("opening_hours", ""),
-        "website": tags.get("website") or tags.get("contact:website") or "",
-    }
-
-
-def places_near(lat: float, lon: float, radius_m: int) -> List[Dict[str, Any]]:
-    q = overpass_places_query(lat, lon, radius_m)
-    data = overpass_post(q, timeout=60)
-    elements = data.get("elements", [])
-
-    places = [p for p in (extract_place(el, lat, lon) for el in elements) if p]
-    for p in places:
-        dist_score = 1 - (p["distance_m"] / max(1, radius_m))
-        p["combined_score"] = round(
-            dist_score * 0.6 + (p["quality_score"] / 5) * 0.4, 3
-        )
-
-    places.sort(key=lambda x: x["combined_score"], reverse=True)
-    return places
-
-
 # ===== ORS 고도 프로파일 =====
 def _sample_latlon(
     latlon: List[Tuple[float, float]], max_points: int = 1800
@@ -520,54 +373,62 @@ def ors_elevation_line(
     api_key: str,
     dataset: str = "srtm",
 ) -> List[Tuple[float, float, float]]:
-    """
-    입력: [(lat, lon), ...]
-    출력: [(lat, lon, elev_m), ...]
-    """
     if not api_key:
         raise ValueError("ORS_API_KEY is empty")
 
     latlon = _sample_latlon(latlon, max_points=min(ORS_MAX_VERTICES - 50, 1800))
     coords_lonlat = [[float(lon), float(lat)] for (lat, lon) in latlon]
 
-    payload = {
-        "format_in": "geojson",
-        "format_out": "geojson",
-        "geometry": {"type": "LineString", "coordinates": coords_lonlat},
-        "dataset": dataset,
-    }
-    headers = {"Authorization": api_key, "Content-Type": "application/json", **UA}
+    payload = {"format_in": "point", "format_out": "point", "geometry": coords_lonlat}
+    headers = {"Authorization": api_key, **UA}
 
     r = requests.post(ORS_ELEVATION_LINE_URL, json=payload, headers=headers, timeout=60)
     r.raise_for_status()
     data = r.json()
 
-    geom = data.get("geometry") or {}
-    coords = geom.get("coordinates") or []
-
+    coords = data.get("geometry", {}).get("coordinates") or []
     out: List[Tuple[float, float, float]] = []
     for c in coords:
-        if isinstance(c, list) and len(c) >= 3:
-            lon, lat, ele = c[0], c[1], c[2]
-            out.append((float(lat), float(lon), float(ele)))
+        if len(c) >= 3:
+            lon, lat, elev = c[0], c[1], c[2]
+            out.append((float(lat), float(lon), float(elev)))
     return out
 
 
 def elevation_profile(
     latlon: List[Tuple[float, float]], api_key: str
 ) -> List[Dict[str, float]]:
+    """
+    ✅ 기존: dist_km, elev_m
+    ✅ 수정: dist_km, elev_m + lat, lon도 같이 제공(지도 고도 색칠용)
+    """
     coords3d = ors_elevation_line(latlon, api_key=api_key)
     if len(coords3d) < 2:
         return []
 
     prof: List[Dict[str, float]] = []
     dist_km = 0.0
-    prof.append({"dist_km": 0.0, "elev_m": float(coords3d[0][2])})
+
+    prof.append(
+        {
+            "dist_km": 0.0,
+            "elev_m": float(coords3d[0][2]),
+            "lat": float(coords3d[0][0]),
+            "lon": float(coords3d[0][1]),
+        }
+    )
 
     for i in range(1, len(coords3d)):
         prev = coords3d[i - 1]
         cur = coords3d[i]
         dist_km += haversine_m(prev[0], prev[1], cur[0], cur[1]) / 1000.0
-        prof.append({"dist_km": round(dist_km, 4), "elev_m": float(cur[2])})
+        prof.append(
+            {
+                "dist_km": round(dist_km, 4),
+                "elev_m": float(cur[2]),
+                "lat": float(cur[0]),
+                "lon": float(cur[1]),
+            }
+        )
 
     return prof
