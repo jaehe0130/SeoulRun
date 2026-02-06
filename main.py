@@ -510,7 +510,8 @@ with col_side:
         df_ele = pd.DataFrame(prof)
         st.markdown(
             """
-        <div style="display:flex; justify-content:space-between; width:100%; font-size:0.85rem; color:rgba(49,51,63,0.6);">
+        <div style="display:flex; justify-content:space-between; width:100%;
+                font-size:0.9rem; font-weight:600; color:#111827;">
         <span>⬅️ 시작점</span>
         <span>도착점 ➡️</span>
         </div>
