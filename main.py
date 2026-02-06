@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
+import sys
 
 import altair as alt
 import folium
@@ -13,21 +14,30 @@ import osm_backend as ob
 from kakaomap import kakao_keyword_search
 
 
-st.set_page_config(page_title="트레킹 코스 추천", page_icon="🥾", layout="wide")
-st.title("🥾 트레킹 코스 추천")
+def K(s: str) -> str:
+    return s.encode("utf-8").decode("unicode_escape")
 
 
-# ====== Weather(OpenWeather) ======
+st.set_page_config(
+    page_title=K("트레킹 코스 추천"),
+    page_icon="🥾",
+    layout="wide",
+)
+st.title(K("🥾 트레킹 코스 추천"))
+
+# =========================
+# Weather
+# =========================
 OPENWEATHER_API_KEY = st.secrets.get("OPENWEATHER_API_KEY", "")
 
 
-@st.cache_data(ttl=600)  # 10분 캐시
-def get_weather_openweather(lat: float, lon: float, api_key: str) -> Dict[str, Any]:
+@st.cache_data(ttl=600)
+def get_weather(lat: float, lon: float):
     url = "https://api.openweathermap.org/data/2.5/weather"
     params = {
         "lat": lat,
         "lon": lon,
-        "appid": api_key,
+        "appid": OPENWEATHER_API_KEY,
         "units": "metric",
         "lang": "kr",
     }
@@ -37,504 +47,235 @@ def get_weather_openweather(lat: float, lon: float, api_key: str) -> Dict[str, A
 
 
 def judge_outdoor(w: Dict[str, Any]) -> Dict[str, Any]:
-    """오늘 야외(러닝/트레킹) 적합도 간단 판정"""
     main = w.get("main", {})
     wind = w.get("wind", {})
     weather = (w.get("weather") or [{}])[0]
     rain = w.get("rain") or {}
-    snow = w.get("snow") or {}
 
     temp = float(main.get("temp", 0))
     feels = float(main.get("feels_like", temp))
-    humidity = float(main.get("humidity", 0))
-    wind_speed = float(wind.get("speed", 0))  # m/s
+    wind_speed = float(wind.get("speed", 0))
     desc = weather.get("description", "")
 
-    # 시간당 강수량 (mm/h)
-    precip = 0.0
-    if "1h" in rain:
-        precip = max(precip, float(rain.get("1h", 0)))
-    if "3h" in rain:
-        precip = max(precip, float(rain.get("3h", 0)) / 3.0)
-    if "1h" in snow:
-        precip = max(precip, float(snow.get("1h", 0)))
-    if "3h" in snow:
-        precip = max(precip, float(snow.get("3h", 0)) / 3.0)
-
+    precip = float(rain.get("1h", 0))
     score = 100
-    reasons: List[str] = []
-
-    # 비/눈
-    if precip >= 2.0:
-        score -= 55
-        reasons.append(f"강한 비/눈 ({precip:.1f}mm/h)")
-    elif precip >= 0.5:
-        score -= 25
-        reasons.append(f"약한 비/눈 ({precip:.1f}mm/h)")
-
-    # 체감온도
-    if feels <= -5:
-        score -= 35
-        reasons.append(f"매우 추움 ({feels:.0f}°C)")
-    elif feels <= 0:
-        score -= 18
-        reasons.append(f"추움 ({feels:.0f}°C)")
-    elif feels >= 30:
-        score -= 30
-        reasons.append(f"더움 ({feels:.0f}°C)")
-
-    # 바람
-    if wind_speed >= 10:
-        score -= 25
-        reasons.append(f"강한 바람 ({wind_speed:.1f}m/s)")
-    elif wind_speed >= 7:
-        score -= 12
-        reasons.append(f"바람이 강함 ({wind_speed:.1f}m/s)")
-
-    # 습도
-    if humidity >= 85 and feels >= 25:
-        score -= 12
-        reasons.append(f"습함 ({humidity:.0f}%)")
+    if precip >= 1:
+        score -= 40
+    if feels <= 0 or feels >= 30:
+        score -= 20
+    if wind_speed >= 8:
+        score -= 15
 
     score = max(0, min(100, score))
-    if score >= 75:
-        level, label = "good", "야외 활동하기 좋아요"
-    elif score >= 50:
-        level, label = "warn", "괜찮지만 주의가 필요합니다"
-    else:
-        level, label = "bad", "오늘은 권장하지 않아요"
 
     return {
-        "level": level,
-        "label": label,
         "score": score,
+        "desc": desc,
         "temp": temp,
         "feels": feels,
-        "humidity": humidity,
-        "wind_speed": wind_speed,
-        "precip_per_h": precip,
-        "desc": desc,
-        "reasons": reasons or ["특이 사항 없음"],
+        "wind": wind_speed,
+        "rain": precip,
     }
 
 
-# ====== Cached backend ======
-@st.cache_data(ttl=60 * 60)
-def cached_courses(
-    bbox: Tuple[float, float, float, float], max_relations: int
-) -> pd.DataFrame:
-    courses = ob.build_courses(bbox, max_relations=max_relations)
-    if not courses:
-        return pd.DataFrame()
-    df = pd.DataFrame(courses)
-    df = df.sort_values(["score", "distance_km"], ascending=False).reset_index(
-        drop=True
-    )
-    return df
-
-
-@st.cache_data(ttl=60 * 20)
-def cached_elevation_profile(coords_latlon, ors_api_key: str):
-    return ob.elevation_profile(coords_latlon, api_key=ors_api_key)
-
-
-@st.cache_data(ttl=60 * 10)
-def cached_kakao_places(
-    query: str,
-    category: str,
-    x: float,
-    y: float,
-    radius_m: int,
-    size: int,
-    api_key: str,
-) -> List[Dict[str, str]]:
-    return kakao_keyword_search(
-        query=query,
-        category=category,
-        x=x,
-        y=y,
-        radius=radius_m,
-        size=size,
-        api_key=api_key,
-    )
-
-
-def _tooltip_one_line(name: str, distance_km: float, difficulty: str) -> folium.Tooltip:
-    html = (
-        "<div style='white-space:nowrap; font-size:12px;'>"
-        f"<b>{name}</b>&nbsp;&nbsp;·&nbsp;&nbsp;{distance_km:.2f}km&nbsp;&nbsp;·&nbsp;&nbsp;{difficulty}"
-        "</div>"
-    )
-    return folium.Tooltip(html, sticky=True)
-
-
-def _kakao_popup_compact(name: str, url: str) -> str:
-    # 세로로 길어지지 않게, 가로 정렬 + 고정 폭
-    safe_url = url or "#"
-    return (
-        "<div style='display:flex; align-items:center; gap:10px; "
-        "max-width:260px; white-space:nowrap;'>"
-        f"<div style='font-weight:700; overflow:hidden; text-overflow:ellipsis;'>{name}</div>"
-        f"<a href='{safe_url}' target='_blank' style='text-decoration:none;'>상세보기</a>"
-        "</div>"
-    )
-
-
-# ====== Sidebar ======
-with st.sidebar:
-    st.header("1) 지역 선택")
-    preset = st.selectbox(
-        "프리셋",
-        ["서울 전체", "용산구", "도봉/노원", "동작/영등포", "강남구", "사용자 지정"],
-    )
-
-    if preset == "사용자 지정":
-        lat = st.number_input("중심 위도", value=37.5665, format="%.6f")
-        lon = st.number_input("중심 경도", value=126.9780, format="%.6f")
-        radius_km = st.slider("반경 (km)", 2.0, 30.0, 12.0, 0.5)
+# =========================
+# Elevation helpers
+# =========================
+def elev_color(elev: float) -> str:
+    if elev < 120:
+        return "#2ecc71"  # green
+    elif elev < 300:
+        return "#f1c40f"  # yellow
     else:
-        presets = {
-            "서울 전체": (37.5665, 126.9780, 18.0),
-            "용산구": (37.5512, 126.9882, 8.0),
-            "도봉/노원": (37.6584, 126.9800, 12.0),
-            "동작/영등포": (37.5250, 126.9250, 10.0),
-            "강남구": (37.4840, 127.0350, 10.0),
-        }
-        lat, lon, radius_km = presets[preset]
+        return "#e67e22"  # orange
 
-    st.header("2) 난이도")
-    diff_filter = st.radio("난이도", ["전체", "쉬움", "보통", "어려움"], index=0)
-    topk = st.slider("추천 코스 개수", 3, 10, 4)
-    max_relations = st.slider("Overpass 최대 관계 수", 20, 80, 50, 5)
 
-    st.header("3) 카카오 카페/맥주 마커")
-    show_kakao = st.checkbox("카카오 마커 표시", value=True)
-    kakao_radius_m = st.slider("카카오 검색 반경 (m)", 200, 5000, 1200, 100)
-    kakao_size = st.slider("카카오 결과 수", 5, 20, 10, 1)
+@st.cache_data(ttl=3600)
+def cached_elevation(coords, api_key: str):
+    return ob.elevation_profile(coords, api_key=api_key)
 
-    st.header("4) 고도 그래프")
-    show_elevation = st.checkbox("고도 그래프 표시", value=True)
+
+# =========================
+# Sidebar
+# =========================
+with st.sidebar:
+    st.header(K("지역 선택"))
+    lat = st.number_input("위도", value=37.5665, format="%.6f")
+    lon = st.number_input("경도", value=126.9780, format="%.6f")
+    radius_km = st.slider("반경 (km)", 3.0, 25.0, 10.0)
+
+    topk = st.slider("추천 코스 수", 3, 10, 5)
 
     st.divider()
-    if st.button("캐시 초기화", use_container_width=True):
-        st.cache_data.clear()
-        st.success("캐시가 초기화되었습니다. 다시 실행해보세요.")
+    show_kakao = st.checkbox("카페 / 맥주 마커 표시", value=True)
+    kakao_radius = st.slider("카카오 검색 반경(m)", 300, 3000, 1000)
 
 
-# ====== Load courses ======
+# =========================
+# Load courses
+# =========================
 bbox = ob.bbox_from_center(lat, lon, radius_km)
-
-with st.status("코스 불러오는 중...", expanded=False) as status:
-    try:
-        df = cached_courses(bbox, max_relations=max_relations)
-        status.update(label=f"코스 로딩 완료 ({len(df)})", state="complete")
-    except Exception as e:
-        status.update(label="코스 로딩 실패", state="error")
-        st.error("서버 제한(429) 또는 일시적 오류입니다. 다시 시도해주세요.")
-        st.exception(e)
-        st.stop()
+df = pd.DataFrame(ob.build_courses(bbox, max_relations=40))
 
 if df.empty:
-    st.error(
-        "이 지역에서 코스를 찾지 못했습니다. 반경을 늘리거나 다른 지역을 선택하세요."
+    st.error("추천 코스를 찾지 못했습니다.")
+    st.stop()
+
+df = df.sort_values("score", ascending=False).head(topk).reset_index(drop=True)
+
+selected_name = st.selectbox("상세로 볼 코스 선택", df["name"])
+row = df[df["name"] == selected_name].iloc[0]
+
+# =========================
+# Kakao places
+# =========================
+kakao_food, kakao_cafe = [], []
+kakao_key = st.secrets.get("KAKAO_REST_API_KEY", "")
+
+if show_kakao and kakao_key:
+    kakao_food = kakao_keyword_search(
+        query="맥주",
+        category="FD6",
+        x=row["end_lon"],
+        y=row["end_lat"],
+        radius=kakao_radius,
+        size=10,
+        api_key=kakao_key,
     )
-    st.stop()
+    kakao_cafe = kakao_keyword_search(
+        query="카페",
+        category="CE7",
+        x=row["end_lon"],
+        y=row["end_lat"],
+        radius=kakao_radius,
+        size=10,
+        api_key=kakao_key,
+    )
 
 
-# difficulty filter
-if diff_filter != "전체":
-    df_use = df[df["difficulty"] == diff_filter].copy()
-else:
-    df_use = df.copy()
+# =========================
+# Layout
+# =========================
+col_map, col_info = st.columns([1.4, 1])
 
-if df_use.empty:
-    st.info("선택한 난이도의 코스가 없습니다. 다른 난이도를 선택하세요.")
-    st.stop()
-
-# Top-k
-df_use = df_use.sort_values("score", ascending=False).head(topk).reset_index(drop=True)
-
-# course select
-selected = st.selectbox("상세로 볼 코스 선택", df_use["name"].tolist(), index=0)
-row = df_use[df_use["name"] == selected].iloc[0].to_dict()
-
-
-# ====== Kakao places (near selected course end) ======
-kakao_beer: List[Dict[str, str]] = []
-kakao_cafe: List[Dict[str, str]] = []
-kakao_center: Tuple[float, float] | None = None
-
-if show_kakao:
-    try:
-        kakao_key = st.secrets.get("KAKAO_REST_API_KEY", "") or st.secrets.get(
-            "KAKAO_REST_KEY", ""
-        )
-        if kakao_key:
-            end_lon = float(row["end_lon"])
-            end_lat = float(row["end_lat"])
-            kakao_center = (end_lat, end_lon)
-
-            # 맥주/술집은 FD6(음식점) 기반 + 키워드
-            kakao_beer = cached_kakao_places(
-                query="맥주",
-                category="FD6",
-                x=end_lon,
-                y=end_lat,
-                radius_m=int(kakao_radius_m),
-                size=int(kakao_size),
-                api_key=kakao_key,
-            )
-            kakao_cafe = cached_kakao_places(
-                query="카페",
-                category="CE7",
-                x=end_lon,
-                y=end_lat,
-                radius_m=int(kakao_radius_m),
-                size=int(kakao_size),
-                api_key=kakao_key,
-            )
-        else:
-            st.sidebar.info("KAKAO_REST_API_KEY가 없어 카카오 마커를 숨깁니다.")
-    except Exception as e:
-        st.sidebar.warning(
-            "Kakao Local 호출 실패. API 키와 네트워크/IP 제한을 확인하세요."
-        )
-        st.sidebar.exception(e)
-
-
-# ====== Elevation (for panel) ======
-ors_key = st.secrets.get("ORS_API_KEY", "")
-prof: List[Dict[str, Any]] = []
-elev_available = False
-
-if show_elevation and ors_key:
-    try:
-        prof = cached_elevation_profile(row["coords"], ors_key) or []
-        elev_available = len(prof) >= 2
-    except Exception:
-        prof = []
-        elev_available = False
-
-
-# ====== Layout: Map (left) + Weather/Elevation (right) ======
-col_map, col_side = st.columns([1.35, 1], gap="large")
-
+# =========================
+# MAP
+# =========================
 with col_map:
-    st.subheader("추천 코스 + 카페/맥주 (OpenStreetMap)")
-    m = folium.Map(location=[lat, lon], zoom_start=12, tiles="OpenStreetMap")
+    m = folium.Map(location=[lat, lon], zoom_start=12)
 
-    # bbox outline
-    s, w_, n, e = bbox
-    folium.Rectangle(
-        bounds=[[s, w_], [n, e]], color="#0984e3", weight=2, fill=False
-    ).add_to(m)
+    ors_key = st.secrets.get("ORS_API_KEY", "")
+    elev_profile = []
+    if ors_key:
+        try:
+            elev_profile = cached_elevation(row["coords"], ors_key)
+        except Exception:
+            elev_profile = []
 
-    # draw routes
-    selected_name = row["name"]
-    for i, r in df_use.iterrows():
+    for _, r in df.iterrows():
         latlon = r["coords"]
+        is_selected = r["name"] == selected_name
 
-        # 기본 색상(코스별) - 고도 색상은 오른쪽 그래프에서만, 지도는 가독성 우선
-        color = "#2ecc71" if r["name"] == selected_name else "#6c5ce7"
-        weight = 8 if r["name"] == selected_name else 5
-        opacity = 0.95 if r["name"] == selected_name else 0.75
+        if is_selected and elev_profile:
+            elevs = [p["elev_m"] for p in elev_profile]
+            n = min(len(latlon), len(elevs))
+            for i in range(n - 1):
+                seg = [latlon[i], latlon[i + 1]]
+                folium.PolyLine(
+                    seg,
+                    color=elev_color(elevs[i]),
+                    weight=8,
+                    opacity=0.95,
+                ).add_to(m)
+        else:
+            folium.PolyLine(
+                latlon,
+                color="#2ecc71",
+                weight=8 if is_selected else 5,
+                opacity=0.9,
+                tooltip=f"{r['name']} · {r['distance_km']}km · {r['difficulty']}",
+            ).add_to(m)
 
-        folium.PolyLine(
-            latlon,
-            color=color,
-            weight=weight,
-            opacity=opacity,
-            tooltip=_tooltip_one_line(
-                str(r["name"]), float(r["distance_km"]), str(r["difficulty"])
-            ),
+        # start / end markers
+        folium.Marker(
+            [r["start_lat"], r["start_lon"]],
+            icon=folium.Icon(color="blue", icon="play"),
+            tooltip="출발",
         ).add_to(m)
 
-    # start/end marker (selected)
-    folium.Marker(
-        location=[float(row["start_lat"]), float(row["start_lon"])],
-        tooltip="출발",
-        icon=folium.Icon(color="blue", icon="play"),
-    ).add_to(m)
-
-    folium.Marker(
-        location=[float(row["end_lat"]), float(row["end_lon"])],
-        tooltip="도착",
-        icon=folium.Icon(color="red", icon="flag"),
-    ).add_to(m)
+        folium.Marker(
+            [r["end_lat"], r["end_lon"]],
+            icon=folium.Icon(color="red", icon="flag"),
+            tooltip="도착",
+        ).add_to(m)
 
     # Kakao markers
-    if kakao_center:
-        folium.CircleMarker(
-            location=[kakao_center[0], kakao_center[1]],
-            radius=5,
-            color="#2d3436",
-            fill=True,
-            fill_color="#2d3436",
-            tooltip="카카오 검색 기준점",
-        ).add_to(m)
-
-    # 맥주: 보라색 / 카페: 분홍색
-    for p in kakao_beer:
-        try:
-            lat_p = float(p.get("y", 0))
-            lon_p = float(p.get("x", 0))
-        except Exception:
-            continue
-        name = p.get("place_name", "") or "맥주"
-        url = p.get("place_url", "")
+    for p in kakao_food:
         folium.Marker(
-            location=[lat_p, lon_p],
-            popup=_kakao_popup_compact(name, url),
+            [float(p["y"]), float(p["x"])],
             icon=folium.Icon(color="purple", icon="glass"),
+            popup=f"<b>{p['place_name']}</b> · <a href='{p['place_url']}' target='_blank'>상세보기</a>",
         ).add_to(m)
 
     for p in kakao_cafe:
-        try:
-            lat_p = float(p.get("y", 0))
-            lon_p = float(p.get("x", 0))
-        except Exception:
-            continue
-        name = p.get("place_name", "") or "카페"
-        url = p.get("place_url", "")
         folium.Marker(
-            location=[lat_p, lon_p],
-            popup=_kakao_popup_compact(name, url),
+            [float(p["y"]), float(p["x"])],
             icon=folium.Icon(color="pink", icon="coffee"),
+            popup=f"<b>{p['place_name']}</b> · <a href='{p['place_url']}' target='_blank'>상세보기</a>",
         ).add_to(m)
 
-    st_folium(m, height=620, width=None)
+    st_folium(m, height=650, use_container_width=True)
 
-with col_side:
-    # ✅ 오른쪽 UI: 날씨/야외적합도 + 고도 그래프만
+
+# =========================
+# RIGHT PANEL (Weather + Elevation)
+# =========================
+with col_info:
     st.subheader("날씨 / 야외 적합도")
-    if not OPENWEATHER_API_KEY:
-        st.info("OPENWEATHER_API_KEY가 없어 날씨 패널을 숨깁니다.")
+
+    if OPENWEATHER_API_KEY:
+        w = get_weather(row["start_lat"], row["start_lon"])
+        j = judge_outdoor(w)
+        st.metric("적합도 점수", f"{j['score']} / 100")
+        st.write(f"{j['desc']}")
+        st.write(
+            {
+                "기온": f"{j['temp']}℃",
+                "체감": f"{j['feels']}℃",
+                "바람": f"{j['wind']} m/s",
+                "강수": f"{j['rain']} mm",
+            }
+        )
     else:
-        wlat, wlon = float(row["start_lat"]), float(row["start_lon"])
-        try:
-            w = get_weather_openweather(wlat, wlon, OPENWEATHER_API_KEY)
-            judge = judge_outdoor(w)
+        st.info("날씨 API 키가 없습니다.")
 
-            msg = f"{judge['label']}  (점수 {judge['score']}/100) · {judge['desc']}"
-            if judge["level"] == "good":
-                st.success(msg)
-            elif judge["level"] == "warn":
-                st.warning(msg)
-            else:
-                st.error(msg)
-
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("기온(°C)", f"{judge['temp']:.1f}")
-            c2.metric("체감(°C)", f"{judge['feels']:.1f}")
-            c3.metric("바람(m/s)", f"{judge['wind_speed']:.1f}")
-            c4.metric("강수(mm/h)", f"{judge['precip_per_h']:.1f}")
-            st.progress(int(judge["score"]))
-        except Exception as e:
-            st.warning("날씨 API 호출 실패. 네트워크/키를 확인하세요.")
-            st.exception(e)
-
+    st.divider()
     st.subheader("고도 그래프")
-    if not show_elevation:
-        st.caption("사이드바에서 '고도 그래프 표시'를 켜면 표시됩니다.")
-    elif not ors_key:
-        st.info("ORS_API_KEY가 없어 고도 그래프를 표시할 수 없습니다.")
-    elif not elev_available:
-        st.info("이 루트는 고도 정보가 없습니다.")
-    else:
-        df_ele = pd.DataFrame(prof)
-        # 차트 높이를 고정해서 지도 높이와 대략 균형 맞추기
-        ele_chart = (
+
+    if elev_profile:
+        df_ele = pd.DataFrame(elev_profile)
+        chart = (
             alt.Chart(df_ele)
             .mark_line()
             .encode(
-                x=alt.X("dist_km:Q", title="거리(km)"),
-                y=alt.Y("elev_m:Q", title="고도(m)"),
+                x="dist_km",
+                y="elev_m",
                 tooltip=["dist_km", "elev_m"],
             )
-            .properties(height=260)
         )
-        st.altair_chart(ele_chart, use_container_width=True)
-
-        elev = df_ele["elev_m"].tolist()
-        ascent = 0.0
-        descent = 0.0
-        for i in range(1, len(elev)):
-            delta = elev[i] - elev[i - 1]
-            if delta > 0:
-                ascent += delta
-            else:
-                descent += -delta
-
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("최저(m)", f"{float(df_ele['elev_m'].min()):.0f}")
-        m2.metric("최고(m)", f"{float(df_ele['elev_m'].max()):.0f}")
-        m3.metric("총 상승(m)", f"{ascent:.0f}")
-        m4.metric("총 하강(m)", f"{descent:.0f}")
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.info("고도 정보가 없습니다.")
 
 
+# =========================
+# Bottom – course table
+# =========================
 st.divider()
+st.subheader("추천 코스 목록")
 
-# ====== 아래(전체 폭): 추천코스 정보 + 가중치/점수 ======
-st.subheader("추천코스 정보 / 점수(가중치)")
-
-# 추천 코스 표 (전체 폭)
-show_cols = [
-    "name",
-    "difficulty",
-    "distance_km",
-    "members",
-    "score",
-    "score_osm",
-    "trust_score",
-    "official_matched",
-]
-exist_cols = [c for c in show_cols if c in df_use.columns]
-st.dataframe(df_use[exist_cols], use_container_width=True, hide_index=True)
-
-# 점수(가중치) - 선택 코스만, 화면 가로를 채우도록 metric으로 배치
-bd = row.get("score_breakdown") or {}
-members_term = bd.get("members_term")
-distance_term = bd.get("distance_term")
-trust_score = bd.get("trust_score")
-score_osm = bd.get("score_osm", row.get("score_osm"))
-score_final = bd.get("score_final", row.get("score"))
-
-st.markdown("#### 선택 코스 점수 구성")
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("멤버수", f"{int(row.get('members', 0))}")
-c2.metric(
-    "멤버 항", f"{members_term:.3f}" if isinstance(members_term, (int, float)) else "—"
+st.dataframe(
+    df[["name", "difficulty", "distance_km", "members", "score"]],
+    use_container_width=True,
+    hide_index=True,
 )
-c3.metric(
-    "거리 항",
-    f"{distance_term:.3f}" if isinstance(distance_term, (int, float)) else "—",
-)
-c4.metric(
-    "신뢰도 가산",
-    (
-        f"{float(trust_score):.3f}"
-        if isinstance(trust_score, (int, float))
-        else f"{float(row.get('trust_score', 0)):.3f}"
-    ),
-)
-c5.metric(
-    "최종 점수",
-    (
-        f"{float(score_final):.3f}"
-        if isinstance(score_final, (int, float))
-        else f"{float(row.get('score', 0)):.3f}"
-    ),
-)
-
-# 거리/점수 차트 (전체 폭)
-df_chart = df_use[["name", "difficulty", "distance_km", "members", "score"]].copy()
-chart = (
-    alt.Chart(df_chart)
-    .mark_bar()
-    .encode(
-        x=alt.X("name:N", title="코스"),
-        y=alt.Y("distance_km:Q", title="거리(km)"),
-        tooltip=["name", "difficulty", "distance_km", "members", "score"],
-    )
-)
-st.altair_chart(chart, use_container_width=True)
