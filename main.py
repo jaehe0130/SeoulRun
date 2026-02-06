@@ -230,16 +230,16 @@ with st.sidebar:
         default=["쉬움", "보통", "어려움"],
     )
 
-    topk = st.slider("추천 코스 개수", 3, 10, 4)
-    max_relations = st.slider("Overpass 최대 관계 수", 20, 80, 50, 5)
+    topk = st.slider("추천 코스 개수", 3, 8, 4)
+    max_relations = st.slider("코스 탐색량", 20, 50, 30, 5)
 
     st.header("3) 공공데이터 반영")
     use_public = st.checkbox("공공데이터 매칭 반영", value=True)
 
     st.header("4) 카카오 카페/맥주 마커")
     show_kakao = st.checkbox("카카오 마커 표시", value=True)
-    kakao_radius_m = st.slider("카카오 검색 반경 (m)", 200, 5000, 1200, 100)
-    kakao_size = st.slider("카카오 결과 수", 5, 20, 10, 1)
+    kakao_radius_m = st.slider("검색 반경 (m)", 200, 2000, 1200, 100)
+    kakao_size = st.slider("검색 결과 수", 5, 10, 5, 1)
 
     st.header("5) 고도 그래프/지도 색칠")
     show_elevation = st.checkbox("고도 그래프 표시", value=True)
