@@ -508,7 +508,11 @@ with col_side:
         st.info("이 루트는 고도 정보가 없습니다.")
     else:
         df_ele = pd.DataFrame(prof)
-        st.caption("시작점                          도착점")
+        cL, cR = st.columns([1, 1])
+        with cL:
+            st.caption("⬅️ 시작점")
+        with cR:
+            st.caption("도착점 ➡️")
         ele_chart = (
             alt.Chart(df_ele)
             .mark_line()
