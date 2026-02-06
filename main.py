@@ -15,16 +15,14 @@ from kakaomap import kakao_keyword_search
 # ======================================================
 # 고정 설정값 (UI에서 제거된 값들)
 # ======================================================
-TOPK = 4
-MAX_RELATIONS = 50
+TOPK = 4  # 추천 코스 개수
+MAX_RELATIONS = 50  # 후보 탐색량
 
-PUBLIC_DATA_FILES = 1500
-PUBLIC_MATCH_DIST = 250
+PUBLIC_DATA_FILES = 1500  # 공공데이터 파일 수 (고정)
+AFTER_TREK_RADIUS = 700  # 트레킹 후 추천 반경 (고정)
 
-AFTER_TREK_RADIUS = 700
-
-KAKAO_RADIUS = 2000
-KAKAO_SIZE = 10
+KAKAO_RADIUS = 2000  # 카카오 검색 반경 (고정)
+KAKAO_SIZE = 10  # 카카오 결과 수 (고정)
 
 
 # ======================================================
@@ -94,16 +92,28 @@ def judge_outdoor(w: Dict[str, Any]) -> Dict[str, Any]:
 # ======================================================
 def elev_color(elev: float) -> str:
     if elev < 120:
-        return "#2ecc71"
+        return "#2ecc71"  # green
     elif elev < 300:
-        return "#f1c40f"
+        return "#f1c40f"  # yellow
     else:
-        return "#e67e22"
+        return "#e67e22"  # orange
 
 
 @st.cache_data(ttl=3600)
 def cached_elevation(coords, api_key: str):
     return ob.elevation_profile(coords, api_key=api_key)
+
+
+# ======================================================
+# 공공데이터(GPX) 인덱스 로드
+# ======================================================
+@st.cache_data(ttl=60 * 60)
+def cached_official_index(data_dir: str, bbox, max_files: int = 1500):
+    return ob.load_official_gpx_index(
+        data_dir=data_dir,
+        bbox=bbox,
+        max_files=max_files,
+    )
 
 
 # ======================================================
@@ -136,16 +146,23 @@ with st.sidebar:
 
 
 # ======================================================
-# Load courses
+# Load courses (공공데이터 반영 핵심)
 # ======================================================
 bbox = ob.bbox_from_center(lat, lon, radius_km)
+
+official_index = None
+if use_public:
+    official_index = cached_official_index(
+        data_dir="data",
+        bbox=bbox,
+        max_files=PUBLIC_DATA_FILES,
+    )
+
 df = pd.DataFrame(
     ob.build_courses(
         bbox,
         max_relations=MAX_RELATIONS,
-        use_public_data=use_public,
-        public_files=PUBLIC_DATA_FILES,
-        public_match_dist=PUBLIC_MATCH_DIST,
+        official_index=official_index,  # ✅ 공공데이터 반영
     )
 )
 
@@ -155,6 +172,7 @@ if df.empty:
 
 df = df[df["difficulty"].isin(diff_filter)]
 df = df.sort_values("score", ascending=False).head(TOPK).reset_index(drop=True)
+
 
 # ======================================================
 # 선택 코스 상태 (마커 클릭 연동)
